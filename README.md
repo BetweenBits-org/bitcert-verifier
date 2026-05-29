@@ -39,8 +39,8 @@ The only things you trust are **SHA-256** and the **Bitcoin blockchain**. Not us
 
 ### Browser (no install, works offline)
 
-1. Open **https://betweenbits-org.github.io/bitcert-verifier/**
-   *(or download `index.html` and open it locally — it makes no network calls on its own).*
+1. Download [`index.html`](index.html) from this repo and open it in any browser
+   (it works straight from `file://` and makes no network calls on its own).
 2. Paste or drop a proof bundle JSON.
 3. Click **Verify offline**.
 
@@ -130,10 +130,10 @@ hosted page equals this source:
 shasum -a 256 index.html
 ```
 
-CI publishes the same `SHA256(index.html)` on every release and as a build
-artifact, so the GitHub Pages deployment can be matched byte-for-byte against this
-repository. The verifier vendors **no** third-party code (no CDN, no npm), so there
-is no supply-chain surface at runtime.
+CI publishes the same `SHA256(index.html)` as a build artifact on every run, so any
+copy you obtain can be matched byte-for-byte against this repository. The verifier
+vendors **no** third-party code (no CDN, no npm), so there is no supply-chain surface
+at runtime.
 
 ## Tests
 
