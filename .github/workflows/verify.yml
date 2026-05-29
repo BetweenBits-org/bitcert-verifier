@@ -1,0 +1,75 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regenerate fixtures (must be reproducible — no diff)
+        run: |
+          python3 fixtures/generate.py
+          git diff --exit-code -- fixtures index.html \
+            || (echo "::error::fixtures/index.html drifted; run fixtures/generate.py and commit" && exit 1)
+
+      - name: Worked examples (link A/B/C, both schemes, tamper detection)
+        run: bash examples/run.sh
+
+      - name: CLI — valid bundle must PASS
+        run: python3 verify-cli/verify.py fixtures/sample-bundle.valid.json
+
+      - name: CLI — tampered bundle must FAIL
+        run: |
+          if python3 verify-cli/verify.py fixtures/sample-bundle.tampered.json; then
+            echo "::error::tampered bundle unexpectedly verified" && exit 1
+          else
+            echo "tampered correctly rejected"
+          fi
+
+      - name: Browser JS == Python == ann-core test vector
+        run: node fixtures/browser-js-check.mjs
+
+      - name: Publish SHA256(index.html) for reproducible-build matching
+        run: |
+          sha256sum index.html | tee index.html.sha256
+          echo "### \`SHA256(index.html)\`" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat index.html.sha256 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: index-html-sha256
+          path: index.html.sha256
+
+  deploy-pages:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Stage site (single self-contained file)
+        run: |
+          mkdir -p _site
+          cp index.html _site/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4

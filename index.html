@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BitCert Independent Proof Verifier</title>
+<!--
+  BitCert Independent Proof Verifier — single self-contained file, MIT licensed.
+  https://github.com/BetweenBits-org/bitcert-verifier
+
+  Trust-minimized by design. This page calls NO BitCert server. It verifies a
+  proof bundle (see docs/bundle-schema.md) using only:
+    (1) math — SHA-256 / RFC-6962 Merkle, via the browser's Web Crypto API, and
+    (2) the Bitcoin blockchain — observed through a source YOU choose.
+
+  It has zero external dependencies and works fully offline (open via file://).
+  The only optional network call is the on-chain confirmation step (§4.3), which
+  hits a Bitcoin explorer/node of your choosing — never BitCert.
+-->
+<style>
+  :root {
+    --bg:#0b0e14; --panel:#141925; --panel2:#1b2230; --ink:#e6edf3; --muted:#8b97a7;
+    --line:#283041; --ok:#3fb950; --bad:#f85149; --warn:#d29922; --skip:#6e7681;
+    --accent:#58a6ff; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:920px; margin:0 auto; padding:32px 20px 80px; }
+  header h1 { font-size:22px; margin:0 0 4px; }
+  header p { color:var(--muted); margin:0 0 22px; }
+  .badge { display:inline-block; font:11px var(--mono); color:var(--accent);
+    border:1px solid var(--line); border-radius:999px; padding:2px 9px; margin-bottom:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:18px; margin-bottom:18px; }
+  label.h { display:block; font-weight:600; margin-bottom:8px; }
+  textarea { width:100%; min-height:150px; resize:vertical; background:var(--bg);
+    color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:12px;
+    font:12.5px var(--mono); }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  button { background:var(--accent); color:#06121f; border:0; border-radius:8px;
+    padding:10px 16px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  input[type=text] { flex:1; min-width:220px; background:var(--bg); color:var(--ink);
+    border:1px solid var(--line); border-radius:8px; padding:9px 11px; font:12.5px var(--mono); }
+  .drop { border:1.5px dashed var(--line); border-radius:8px; padding:10px;
+    text-align:center; color:var(--muted); font-size:13px; }
+  .drop.over { border-color:var(--accent); color:var(--accent); }
+  .verdict { font-size:18px; font-weight:700; padding:14px 16px; border-radius:10px;
+    display:none; margin-bottom:18px; }
+  .verdict.ok  { display:block; background:rgba(63,185,80,.12);  border:1px solid var(--ok);  color:var(--ok); }
+  .verdict.bad { display:block; background:rgba(248,81,73,.12);  border:1px solid var(--bad); color:var(--bad); }
+  .verdict small { display:block; font-weight:400; color:var(--muted); margin-top:4px; }
+  .step { border:1px solid var(--line); border-radius:10px; padding:14px 16px;
+    margin-bottom:10px; background:var(--panel2); }
+  .step .top { display:flex; align-items:center; gap:10px; }
+  .step .icon { width:22px; height:22px; border-radius:50%; flex:none; display:grid;
+    place-items:center; font-size:13px; font-weight:700; }
+  .icon.ok{background:var(--ok);color:#04210c} .icon.bad{background:var(--bad);color:#2b0606}
+  .icon.skip{background:var(--skip);color:#0b0e14} .icon.warn{background:var(--warn);color:#241a02}
+  .icon.idle{background:var(--line);color:var(--muted)}
+  .step .title { font-weight:600; }
+  .step .detail { color:var(--muted); font-size:13px; margin-top:6px;
+    word-break:break-all; font-family:var(--mono); }
+  .kv { font-family:var(--mono); font-size:12px; color:var(--muted); }
+  .kv b { color:var(--ink); font-weight:600; }
+  footer { color:var(--muted); font-size:12.5px; margin-top:26px; line-height:1.7; }
+  a { color:var(--accent); }
+  .hint { font-size:12.5px; color:var(--muted); margin-top:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="badge">offline · trust-minimized · no BitCert calls</div>
+    <h1>BitCert Independent Proof Verifier</h1>
+    <p>Confirm a record was anchored to Bitcoin and not tampered with — using only
+       math and the Bitcoin blockchain. This page never contacts BitCert.</p>
+  </header>
+
+  <div id="verdict" class="verdict"></div>
+
+  <div class="card">
+    <label class="h" for="bundle">1 · Proof bundle (JSON)</label>
+    <textarea id="bundle" placeholder='Paste the proof bundle JSON here, or drop a .json file below…'></textarea>
+    <div id="drop" class="drop">drop a <code>.json</code> bundle file here</div>
+    <div class="row">
+      <button id="verify">Verify offline</button>
+      <button id="sample" class="ghost">Load sample</button>
+      <button id="clear" class="ghost">Clear</button>
+    </div>
+    <div class="hint">Steps 1–3 below are pure offline cryptography. Step 4
+      (on-chain confirmation) is optional and uses a Bitcoin source you choose.</div>
+  </div>
+
+  <div class="card">
+    <label class="h">0 · Original record <span class="kv">(optional · link A — proves the leaf is really YOUR record)</span></label>
+    <p class="hint" style="margin-top:0">Without this, the verifier proves a 32-byte digest is anchored.
+      Supply your original below to also prove that digest is your document or balance.</p>
+    <div class="row">
+      <div style="flex:1; min-width:240px">
+        <div class="kv" style="margin-bottom:4px">file artifact (PDF/report) — for <b>sha256-file</b></div>
+        <input id="origfile" type="file">
+      </div>
+    </div>
+    <div class="row">
+      <input id="acct" type="text" placeholder="account id — for sha256-jcs-fields (daily balance)">
+      <input id="salt" type="text" placeholder="your private salt (hex) — never in the bundle">
+    </div>
+    <div class="hint">The salt is your secret; it is intentionally not part of the public bundle.</div>
+  </div>
+
+  <div id="steps"></div>
+
+  <div class="card" id="onchainCard" style="display:none">
+    <label class="h">4 · On-chain confirmation <span class="kv">(optional · the only Bitcoin-dependent step)</span></label>
+    <p class="hint" style="margin-top:0">Look up <span class="kv"><b id="oc-txid"></b></span> on a
+      Bitcoin source of your choosing — <b>never BitCert</b>. Offline? Skip this; steps 1–3 already
+      bind the record to that exact transaction id.</p>
+    <div class="row">
+      <input id="explorer" type="text" value="https://mempool.space"
+             placeholder="explorer base URL (e.g. https://mempool.space, or your self-hosted esplora)">
+      <button id="checkchain" class="ghost">Check on-chain</button>
+    </div>
+    <div class="hint">Uses the explorer's public REST API
+      (<span class="kv">/api/tx/&lt;txid&gt;</span>). For regtest/private anchors use your
+      self-hosted explorer. For mainnet/testnet, any public explorer works.</div>
+  </div>
+
+  <footer>
+    <b>What this proves.</b> (1) the record's leaf is included in the Merkle root;
+    (2) that root is the value committed inside the transaction's OP_RETURN;
+    (3) those OP_RETURN bytes belong to exactly that <span class="kv">reveal_txid</span>
+    (double-SHA-256 of the raw transaction, computed here). Step 4 then shows that
+    txid sits in a Bitcoin block.<br>
+    Source &amp; spec: <a href="https://github.com/BetweenBits-org/bitcert-verifier">github.com/BetweenBits-org/bitcert-verifier</a>
+    · You trust only <b>SHA-256</b> and <b>Bitcoin</b>, not us.
+  </footer>
+</div>
+
+<script>
+"use strict";
+/* ---------- hex / bytes ---------- */
+function hexToBytes(h){
+  if(typeof h!=="string"||h.length%2) throw new Error("bad hex");
+  h=h.toLowerCase();
+  if(!/^[0-9a-f]*$/.test(h)) throw new Error("non-hex chars");
+  const out=new Uint8Array(h.length/2);
+  for(let i=0;i<out.length;i++) out[i]=parseInt(h.substr(i*2,2),16);
+  return out;
+}
+function bytesToHex(b){ let s=""; for(let i=0;i<b.length;i++) s+=b[i].toString(16).padStart(2,"0"); return s; }
+function concat(){ let n=0; for(const a of arguments) n+=a.length;
+  const o=new Uint8Array(n); let k=0; for(const a of arguments){o.set(a,k);k+=a.length;} return o; }
+function eqHex(a,b){ return typeof a==="string"&&typeof b==="string"&&a.toLowerCase()===b.toLowerCase(); }
+
+/* ---------- hashing (Web Crypto) ---------- */
+async function sha256(bytes){ return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)); }
+async function sha256d(bytes){ return sha256(await sha256(bytes)); }
+const LEAF_TAG=Uint8Array.of(0x00), NODE_TAG=Uint8Array.of(0x01);
+async function leafHash(d){ return sha256(concat(LEAF_TAG,d)); }            // SHA-256(0x00 || d)
+async function nodeHash(l,r){ return sha256(concat(NODE_TAG,l,r)); }        // SHA-256(0x01 || l || r)
+
+/* ---------- §3 merkle inclusion ---------- */
+async function verifyMerkle(rec, m){
+  const leaf=hexToBytes(rec.leaf_bytes);
+  if(leaf.length!==32) throw new Error("leaf_bytes must be 32 bytes");
+  if(!Array.isArray(m.siblings)||!Array.isArray(m.directions)||m.siblings.length!==m.directions.length)
+    throw new Error("siblings/directions length mismatch");
+  let cur=await leafHash(leaf);
+  for(let i=0;i<m.siblings.length;i++){
+    const sib=hexToBytes(m.siblings[i]); const dir=m.directions[i];
+    if(sib.length!==32) throw new Error("sibling "+i+" not 32 bytes");
+    if(dir==="left") cur=await nodeHash(sib,cur);
+    else if(dir==="right") cur=await nodeHash(cur,sib);
+    else throw new Error('direction must be "left"/"right", got '+dir);
+  }
+  return { computedRoot:bytesToHex(cur), ok:eqHex(bytesToHex(cur),m.root) };
+}
+
+/* ---------- §4.1 OP_RETURN decode ---------- */
+function decodeOpReturn(payloadHex){
+  const b=hexToBytes(payloadHex);
+  const magic=String.fromCharCode(b[0],b[1],b[2],b[3]);
+  if(magic==="BC01"){
+    if(b.length!==53) throw new Error("BC01 must be 53 bytes, got "+b.length);
+    return { format:"BC01", version:b[4], merkle_root:bytesToHex(b.slice(5,37)),
+             batch_id:bytesToHex(b.slice(37,53)) };
+  }
+  if(magic==="BC30"){
+    if(b.length!==86) throw new Error("BC30 must be 86 bytes, got "+b.length);
+    return { format:"BC30", version:b[4], flags:b[5], batch_id:bytesToHex(b.slice(6,22)),
+             merkle_root:bytesToHex(b.slice(22,54)), aux:bytesToHex(b.slice(54,86)) };
+  }
+  throw new Error("unknown OP_RETURN magic (expected BC01/BC30)");
+}
+
+/* ---------- §4.2 raw tx parse + legacy txid ---------- */
+function Reader(bytes){ this.b=bytes; this.o=0; }
+Reader.prototype.take=function(n){ const s=this.b.slice(this.o,this.o+n); if(s.length!==n) throw new Error("tx truncated"); this.o+=n; return s; };
+Reader.prototype.u8=function(){ return this.take(1)[0]; };
+Reader.prototype.u32=function(){ const x=this.take(4); return x[0]|x[1]<<8|x[2]<<16|x[3]*0x1000000; };
+Reader.prototype.varint=function(){
+  const f=this.u8();
+  if(f<0xfd) return f;
+  if(f===0xfd){ const x=this.take(2); return x[0]|x[1]<<8; }
+  if(f===0xfe){ const x=this.take(4); return x[0]|x[1]<<8|x[2]<<16|x[3]*0x1000000; }
+  const x=this.take(8); let n=0; for(let i=0;i<8;i++) n+=x[i]*Math.pow(2,8*i); return n; // u64 (sat-safe enough)
+};
+function encVarint(n){
+  if(n<0xfd) return Uint8Array.of(n);
+  if(n<=0xffff) return Uint8Array.of(0xfd,n&0xff,n>>8&0xff);
+  return Uint8Array.of(0xfe,n&0xff,n>>8&0xff,n>>16&0xff,n>>>24&0xff);
+}
+// Parse a (possibly segwit) tx. Returns {txidLegacyBytes(reserialized, no witness), outputs:[{value,script}]}.
+function parseTx(hexStr){
+  const r=new Reader(hexToBytes(hexStr));
+  const parts=[];                          // legacy serialization pieces (no marker/flag/witness)
+  parts.push(r.take(4));                    // version
+  let segwit=false;
+  if(r.b[r.o]===0x00 && r.b[r.o+1]===0x01){ segwit=true; r.take(2); } // marker+flag
+  const vin=r.varint(); parts.push(encVarint(vin));
+  for(let i=0;i<vin;i++){
+    parts.push(r.take(32));                 // prev txid
+    parts.push(r.take(4));                  // prev vout
+    const sl=r.varint(); parts.push(encVarint(sl)); parts.push(r.take(sl)); // scriptSig
+    parts.push(r.take(4));                  // sequence
+  }
+  const vout=r.varint(); parts.push(encVarint(vout));
+  const outputs=[];
+  for(let i=0;i<vout;i++){
+    const value=r.take(8);
+    const sl=r.varint(); const script=r.take(sl);
+    parts.push(value); parts.push(encVarint(sl)); parts.push(script);
+    outputs.push({ script });
+  }
+  if(segwit){ for(let i=0;i<vin;i++){ const items=r.varint(); for(let j=0;j<items;j++){ const l=r.varint(); r.take(l); } } }
+  parts.push(r.take(4));                     // locktime
+  return { legacy:concat.apply(null,parts), outputs };
+}
+function extractOpReturn(script){
+  if(script.length<1||script[0]!==0x6a) return null; // OP_RETURN
+  let o=1; if(o>=script.length) return new Uint8Array(0);
+  const op=script[o++]; let len;
+  if(op<=0x4b) len=op;
+  else if(op===0x4c) len=script[o++];
+  else if(op===0x4d){ len=script[o]|script[o+1]<<8; o+=2; }
+  else if(op===0x4e){ len=script[o]|script[o+1]<<8|script[o+2]<<16|script[o+3]*0x1000000; o+=4; }
+  else return null;
+  return script.slice(o,o+len);
+}
+async function txidFromRaw(hexStr){
+  const { legacy, outputs }=parseTx(hexStr);
+  const h=await sha256d(legacy);            // double-SHA-256 of legacy serialization
+  const txid=bytesToHex(h.reverse());       // display (big-endian) order
+  let opret=null;
+  for(const o of outputs){ const p=extractOpReturn(o.script); if(p){ opret=bytesToHex(p); break; } }
+  return { txid, opReturnHex:opret };
+}
+
+/* ---------- §5 chain continuity (optional) ---------- */
+const CHAIN_DOMAIN=new TextEncoder().encode("bitcert:chain:v1\n");
+function jcsEntryCore(e){
+  // RFC-8785 subset: sorted keys, no whitespace. Fields per docs/bundle-schema.md §5.
+  return JSON.stringify({
+    body_hash:e.body_hash, business_date:e.business_date, exchange_id:e.exchange_id,
+    kind:e.kind, prev_entry_hash:e.prev_entry_hash, seq:e.seq
+  });
+}
+async function payloadHash(e){
+  const body=new TextEncoder().encode(jcsEntryCore(e));
+  return bytesToHex(await sha256(concat(CHAIN_DOMAIN,body)));
+}
+
+/* ---------- §2.1 preimage: original → leaf_bytes (link A) ---------- */
+function jcsObj(o){ // sorted keys, compact; values are strings in our schemes
+  const keys=Object.keys(o).sort();
+  return "{"+keys.map(k=>JSON.stringify(k)+":"+JSON.stringify(o[k])).join(",")+"}";
+}
+async function deriveUserCommitment(saltHex, account){
+  return bytesToHex(await sha256(concat(hexToBytes(saltHex), new TextEncoder().encode(account))));
+}
+// originalBytes: Uint8Array|null ; account/salt: string|null
+async function verifyPreimage(record, originalBytes, account, salt){
+  const pre=record.preimage;
+  if(!pre) return null;
+  const leaf=record.leaf_bytes.toLowerCase();
+  if(pre.scheme==="sha256-file"){
+    if(!originalBytes) return { scheme:pre.scheme, status:"need_original" };
+    const computed=bytesToHex(await sha256(originalBytes));
+    return { scheme:pre.scheme, computed, self_ok:eqHex(computed,leaf) };
+  }
+  if(pre.scheme==="sha256-jcs-fields"){
+    const domain=new TextEncoder().encode(pre.domain||"");
+    const computed=bytesToHex(await sha256(concat(domain,new TextEncoder().encode(jcsObj(pre.fields)))));
+    const res={ scheme:pre.scheme, computed, self_ok:eqHex(computed,leaf) };
+    if(account && salt && pre.commitment){
+      const uc=await deriveUserCommitment(salt,account);
+      res.identity_ok=eqHex(uc,pre.fields.user_commitment||"");
+    }
+    return res;
+  }
+  throw new Error("unknown preimage scheme: "+pre.scheme);
+}
+
+/* ---------- UI plumbing ---------- */
+const $=id=>document.getElementById(id);
+const stepsEl=$("steps");
+function renderStep(state, title, detail){
+  const icons={ok:"✓",bad:"✕",skip:"–",warn:"!",idle:"·"};
+  const d=document.createElement("div"); d.className="step";
+  d.innerHTML='<div class="top"><div class="icon '+state+'">'+icons[state]+
+    '</div><div class="title">'+title+'</div></div>'+(detail?'<div class="detail">'+detail+'</div>':"");
+  stepsEl.appendChild(d);
+}
+function verdict(ok, msg, sub){
+  const v=$("verdict"); v.className="verdict "+(ok?"ok":"bad");
+  v.innerHTML=(ok?"✓ ":"✕ ")+msg+(sub?'<small>'+sub+'</small>':"");
+}
+function reset(){ stepsEl.innerHTML=""; $("verdict").className="verdict";
+  $("onchainCard").style.display="none"; }
+
+async function verify(){
+  reset();
+  let bundle;
+  try { bundle=JSON.parse($("bundle").value); }
+  catch(e){ verdict(false,"Not valid JSON","Paste a proof bundle JSON file."); return; }
+
+  if(bundle.schema!=="bitcert-proof-bundle/v1"){
+    verdict(false,"Unsupported bundle schema",
+      'Expected "bitcert-proof-bundle/v1", got '+JSON.stringify(bundle.schema)); return;
+  }
+  renderStep("ok","Schema "+bundle.schema+" · network: "+(bundle.bitcoin_network||"?"));
+
+  let allOk=true;
+
+  // §2.1 preimage — original record → leaf_bytes (link A)
+  try {
+    const f=$("origfile").files[0];
+    const origBytes=f ? new Uint8Array(await f.arrayBuffer()) : null;
+    const acct=$("acct").value.trim()||null, salt=$("salt").value.trim()||null;
+    const pre=await verifyPreimage(bundle.record, origBytes, acct, salt);
+    if(pre===null){
+      renderStep("skip","0 · Original binding — no preimage rule in bundle",
+        "proves a 32-byte digest is anchored, not that it is your document/balance");
+    } else if(pre.status==="need_original"){
+      renderStep("warn","0 · Original binding — supply the original to bind it",
+        "scheme sha256-file: choose your original file above to hash it and match leaf_bytes");
+    } else {
+      let detail="scheme "+pre.scheme+"<br>recomputed leaf_bytes: "+pre.computed;
+      if(pre.identity_ok!==undefined)
+        detail+="<br>identity (account+salt → user_commitment): "+(pre.identity_ok?"match ✓":"MISMATCH ✕");
+      const ok=pre.self_ok && pre.identity_ok!==false;
+      const label=pre.scheme==="sha256-file" ? "original → leaf_bytes matches" : "leaf_bytes = hash(declared fields)";
+      renderStep(ok?"ok":"bad","0 · Original binding — "+label+" "+(ok?"✓":"✕"), detail);
+      allOk=allOk&&ok;
+    }
+  } catch(e){ allOk=false; renderStep("bad","0 · Original binding — error","//"+e.message); }
+
+  // §3 merkle
+  let merkleRoot=null;
+  try {
+    const m=await verifyMerkle(bundle.record, bundle.merkle);
+    merkleRoot=bundle.merkle.root;
+    renderStep(m.ok?"ok":"bad","1 · Merkle inclusion — record is "+(m.ok?"in":"NOT in")+" the root",
+      "leaf_bytes → recomputed root: "+m.computedRoot+(m.ok?"":"<br>claimed root:      "+bundle.merkle.root));
+    allOk=allOk&&m.ok;
+  } catch(e){ allOk=false; renderStep("bad","1 · Merkle inclusion — error","//"+e.message); }
+
+  // §4.1 OP_RETURN commitment
+  let decoded=null;
+  try {
+    decoded=decodeOpReturn(bundle.anchor.op_return_payload_hex);
+    const ok=merkleRoot && eqHex(decoded.merkle_root,merkleRoot);
+    renderStep(ok?"ok":"bad","2 · OP_RETURN commitment — root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
+      "OP_RETURN merkle_root: "+decoded.merkle_root+(ok?"":"<br>does not equal the Merkle root above"));
+    allOk=allOk&&ok;
+  } catch(e){ allOk=false; renderStep("bad","2 · OP_RETURN commitment — error","//"+e.message); }
+
+  // §4.2 offline txid binding
+  let txid=bundle.anchor.reveal_txid;
+  if(bundle.anchor.reveal_tx_hex){
+    try {
+      const t=await txidFromRaw(bundle.anchor.reveal_tx_hex);
+      const txidOk=eqHex(t.txid,bundle.anchor.reveal_txid);
+      const opOk=decoded && eqHex(t.opReturnHex||"",bundle.anchor.op_return_payload_hex);
+      const ok=txidOk&&opOk;
+      renderStep(ok?"ok":"bad","3 · Transaction binding — OP_RETURN "+(ok?"belongs to":"does NOT match")+" reveal_txid",
+        "computed txid: "+t.txid+"<br>bundle  txid: "+bundle.anchor.reveal_txid+
+        "<br>OP_RETURN in raw tx "+(opOk?"matches payload ✓":"MISMATCH ✕"));
+      allOk=allOk&&ok; txid=t.txid;
+    } catch(e){ allOk=false; renderStep("bad","3 · Transaction binding — error","//"+e.message); }
+  } else {
+    renderStep("warn","3 · Transaction binding — skipped (no reveal_tx_hex)",
+      "Bundle states reveal_txid="+txid+" but did not include the raw tx; "+
+      "cannot cryptographically bind OP_RETURN to the txid. Trust level reduced.");
+  }
+
+  // §5 chain (optional)
+  if(bundle.chain && bundle.chain.entry){
+    try {
+      const e=bundle.chain.entry;
+      const ph=await payloadHash(e);
+      const phOk=eqHex(ph,e.payload_hash);
+      // body_hash for daily must equal the merkle root
+      const bodyOk=(e.kind!=="daily")||(merkleRoot && eqHex(e.body_hash,merkleRoot));
+      const ok=phOk&&bodyOk;
+      renderStep(ok?"ok":"warn","4 · Chain entry — payload_hash "+(phOk?"recomputes ✓":"MISMATCH ✕")+
+        (bodyOk?"":" · body_hash ≠ merkle root"),
+        "seq "+e.seq+" ("+e.kind+") prev="+(e.prev_entry_hash||"").slice(0,16)+"…<br>recomputed payload_hash: "+ph);
+      // content-consistency is reported separately and does NOT gate the core verdict
+    } catch(e){ renderStep("warn","4 · Chain entry — error","//"+e.message); }
+  }
+
+  // on-chain panel
+  $("oc-txid").textContent=txid||"(unknown)";
+  $("onchainCard").style.display="block";
+
+  if(allOk){
+    verdict(true,"Cryptographically verified — offline",
+      "This record is committed to Bitcoin transaction "+txid+
+      ". Confirm it sits in a block via step 4 (any Bitcoin source you trust).");
+  } else {
+    verdict(false,"Verification FAILED",
+      "One or more cryptographic checks did not pass. This bundle does not prove what it claims.");
+  }
+}
+
+async function checkOnChain(){
+  const base=$("explorer").value.replace(/\/+$/,"");
+  const txid=$("oc-txid").textContent.trim();
+  const card=$("onchainCard");
+  let note=card.querySelector(".oc-result");
+  if(!note){ note=document.createElement("div"); note.className="detail oc-result"; note.style.marginTop="10px"; card.appendChild(note); }
+  note.textContent="Querying "+base+"/api/tx/"+txid+" …";
+  try {
+    const r=await fetch(base+"/api/tx/"+txid);
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const tx=await r.json();
+    const confirmed=tx.status && tx.status.confirmed;
+    note.innerHTML=confirmed
+      ? "✓ On-chain · block height "+tx.status.block_height+" · block "+(tx.status.block_hash||"").slice(0,20)+"…"
+      : "⏳ Seen but not yet confirmed (in mempool). Re-check after it is mined.";
+  } catch(e){
+    note.innerHTML="Could not reach explorer ("+e.message+"). For regtest/private "+
+      "anchors point this at your self-hosted explorer or your own bitcoind. "+
+      "Steps 1–3 are already proven offline.";
+  }
+}
+
+/* sample bundle (regtest demo) — mirrors fixtures/sample-bundle.valid.json */
+const SAMPLE={"schema": "bitcert-proof-bundle/v1", "bitcoin_network": "regtest", "generated_at": "2026-05-29T09:00:00Z", "record": {"kind": "daily", "leaf_bytes": "648b0571d9ca1715258adbdaf020111bb486ae164edb6472e8f22408b5f91e05", "preimage": {"scheme": "sha256-jcs-fields", "domain": "attest:daily:leaf\n", "fields": {"asset": "BTC", "balance_minor": "150000000", "user_commitment": "fdd2290fb1bc5ab7c6932b17e478c38b1b4f39acee5ba391a7e691b118c055a4"}, "commitment": {"scheme": "sha256-salt-account", "account_field": "account_id"}}, "descriptor": {"exchange_id": "demoex", "business_date": "2026-05-28"}}, "merkle": {"leaf_index": 0, "root": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085", "siblings": ["aa968f99cf907d0981efbc226c01f268aae3fa318d4da0b8f3a869409ac11f11", "292216d8f9a369f521123ee787b0c13b825d984c09752c22e892a75d2caca214"], "directions": ["right", "right"]}, "anchor": {"reveal_txid": "d323c4ecc049b83d521e0b5ba9ec2de3e610fb34e49ed3c4a6c45dfe6b04e45c", "commit_txid": "0000000000000000000000000000000000000000000000000000000000000000", "reveal_tx_hex": "0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000fdffffff020000000000000000596a4c56424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d08500000000000000000000000000000000000000000000000000000000000000002823000000000000225120111111111111111111111111111111111111111111111111111111111111111101400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "op_return_payload_hex": "424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d0850000000000000000000000000000000000000000000000000000000000000000", "confirmed": {"block_height": 142, "block_hash": "0000000000000000000000000000000000000000000000000000000000000000", "confirmations": 6}}, "chain": {"entry": {"exchange_id": "demoex", "seq": 1, "kind": "daily", "prev_entry_hash": "0000000000000000000000000000000000000000000000000000000000000000", "body_hash": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085", "business_date": "2026-05-28", "payload_hash": "bc42cc550d147f5cfb06ec3d19fbb8c3e8d9684c98b2957a0fb22438b96a8af4"}}};
+
+window.addEventListener("DOMContentLoaded",function(){
+  $("verify").onclick=verify;
+  $("clear").onclick=function(){ $("bundle").value=""; reset(); };
+  $("sample").onclick=function(){ $("bundle").value=JSON.stringify(SAMPLE,null,2); reset(); };
+  $("checkchain").onclick=checkOnChain;
+  const drop=$("drop");
+  ["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
+  ["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
+  drop.addEventListener("drop",e=>{ const f=e.dataTransfer.files[0]; if(!f) return;
+    const rd=new FileReader(); rd.onload=()=>{ $("bundle").value=rd.result; reset(); }; rd.readAsText(f); });
+});
+</script>
+</body>
+</html>

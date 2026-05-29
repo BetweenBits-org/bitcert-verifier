@@ -1,0 +1,60 @@
+{
+  "schema": "bitcert-proof-bundle/v1",
+  "bitcoin_network": "regtest",
+  "generated_at": "2026-05-29T09:00:00Z",
+  "record": {
+    "kind": "daily",
+    "leaf_bytes": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "preimage": {
+      "scheme": "sha256-jcs-fields",
+      "domain": "attest:daily:leaf\n",
+      "fields": {
+        "asset": "BTC",
+        "balance_minor": "150000000",
+        "user_commitment": "fdd2290fb1bc5ab7c6932b17e478c38b1b4f39acee5ba391a7e691b118c055a4"
+      },
+      "commitment": {
+        "scheme": "sha256-salt-account",
+        "account_field": "account_id"
+      }
+    },
+    "descriptor": {
+      "exchange_id": "demoex",
+      "business_date": "2026-05-28"
+    }
+  },
+  "merkle": {
+    "leaf_index": 0,
+    "root": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085",
+    "siblings": [
+      "aa968f99cf907d0981efbc226c01f268aae3fa318d4da0b8f3a869409ac11f11",
+      "292216d8f9a369f521123ee787b0c13b825d984c09752c22e892a75d2caca214"
+    ],
+    "directions": [
+      "right",
+      "right"
+    ]
+  },
+  "anchor": {
+    "reveal_txid": "d323c4ecc049b83d521e0b5ba9ec2de3e610fb34e49ed3c4a6c45dfe6b04e45c",
+    "commit_txid": "0000000000000000000000000000000000000000000000000000000000000000",
+    "reveal_tx_hex": "0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000fdffffff020000000000000000596a4c56424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d08500000000000000000000000000000000000000000000000000000000000000002823000000000000225120111111111111111111111111111111111111111111111111111111111111111101400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "op_return_payload_hex": "424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d0850000000000000000000000000000000000000000000000000000000000000000",
+    "confirmed": {
+      "block_height": 142,
+      "block_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "confirmations": 6
+    }
+  },
+  "chain": {
+    "entry": {
+      "exchange_id": "demoex",
+      "seq": 1,
+      "kind": "daily",
+      "prev_entry_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "body_hash": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085",
+      "business_date": "2026-05-28",
+      "payload_hash": "bc42cc550d147f5cfb06ec3d19fbb8c3e8d9684c98b2957a0fb22438b96a8af4"
+    }
+  }
+}

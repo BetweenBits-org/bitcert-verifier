@@ -1,0 +1,1 @@
+BitCert MAS Reg 18H daily attestation report (demo artifact).
