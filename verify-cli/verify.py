@@ -165,6 +165,34 @@ def _jcs_entry_core(e):
 def payload_hash(e):
     return sha256(CHAIN_DOMAIN + _jcs_entry_core(e)).hex()
 
+ZERO_HASH = "00" * 32
+
+def _verify_chain_links(links, head):
+    """Walk an optional ordered list of prior chain entries (ascending seq) and
+    confirm each one (a) recomputes its own payload_hash and (b) hash-links to
+    the next: entry[n].prev_entry_hash == payload_hash(entry[n-1]); the last link
+    must equal the head entry's prev_entry_hash. Returns (ok, detail)."""
+    if not links:
+        return True, ""
+    chain = list(links) + [head]
+    prev_ph = None
+    for e in chain:
+        ph = payload_hash(e)
+        if e is not head:  # head's own payload_hash is checked by the caller
+            if ph.lower() != e.get("payload_hash", "").lower():
+                return False, "link seq %s: payload_hash does not recompute" % e.get("seq")
+        expected_prev = prev_ph if prev_ph is not None else None
+        if expected_prev is None:
+            # genesis-or-first link: prev_entry_hash should be zeros (or it is the
+            # genesis entry itself); we only assert linkage from the 2nd entry on.
+            pass
+        elif e.get("prev_entry_hash", "").lower() != expected_prev.lower():
+            return False, "link seq %s: prev_entry_hash ≠ payload_hash(seq %s)" % (
+                e.get("seq"), e.get("seq", 0) - 1 if isinstance(e.get("seq"), int) else "?")
+        prev_ph = ph
+    return True, "walked %d prior entr%s + head: hash-linkage holds" % (
+        len(links), "y" if len(links) == 1 else "ies")
+
 # ----- §2.1 preimage (link A): original record -> leaf_bytes -----
 def _jcs(obj):
     # RFC-8785 subset: sorted keys, compact. All values are strings in our schemes.
@@ -296,22 +324,41 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
         _line("warn", "3 · Transaction binding — skipped (no reveal_tx_hex)",
               "cannot bind OP_RETURN to txid; trust level reduced")
 
-    # §5 chain (optional, non-gating on content-consistency)
+    # §5 chain (optional) — per-exchange tamper-evident continuity (link D).
+    # Content-consistency is cryptographic and DOES gate the verdict (a forged
+    # payload_hash or a body_hash that does not carry the Merkle root means the
+    # chain entry does not actually commit this day's settlement). On-chain
+    # confirmation (§4.3) stays separate, so a content-valid head entry can still
+    # be reported even while its Bitcoin confirmation is pending.
     ch = bundle.get("chain")
     if ch and ch.get("entry"):
         try:
             e = ch["entry"]
             ph = payload_hash(e)
             ph_ok = ph.lower() == e["payload_hash"].lower()
-            body_ok = e.get("kind") != "daily" or (merkle_root and
+            # body_hash carries the day's Merkle root for daily; report (= merkle root) for monthly.
+            body_ok = e.get("kind") != "daily" or (merkle_root is not None and
                       e.get("body_hash", "").lower() == merkle_root.lower())
-            _line("ok" if (ph_ok and body_ok) else "warn",
+            # optional walk-back: each adjacent pair must hash-link (§5 continuity).
+            links = ch.get("links") or []
+            link_ok, link_detail = _verify_chain_links(links, e)
+            ok = ph_ok and body_ok and link_ok
+            extra = ""
+            if not body_ok:
+                extra += " · body_hash ≠ merkle root"
+            if not link_ok:
+                extra += " · prev-entry link broken"
+            detail = ("seq %s (%s)\nrecomputed payload_hash: %s\nbody_hash %s merkle root" %
+                      (e.get("seq"), e.get("kind"), ph, "=" if body_ok else "≠"))
+            if link_detail:
+                detail += "\n" + link_detail
+            _line("ok" if ok else "bad",
                   "4 · Chain entry — payload_hash %s%s" %
-                  ("recomputes ✓" if ph_ok else "MISMATCH ✗",
-                   "" if body_ok else " · body_hash ≠ merkle root"),
-                  "seq %s (%s)\nrecomputed payload_hash: %s" % (e.get("seq"), e.get("kind"), ph))
+                  ("recomputes ✓" if ph_ok else "MISMATCH ✗", extra),
+                  detail)
+            all_ok &= ok
         except Exception as e:
-            _line("warn", "4 · Chain entry — error", str(e))
+            all_ok = False; _line("bad", "4 · Chain entry — error", str(e))
 
     # on-chain (optional)
     if explorer and txid:

@@ -272,6 +272,22 @@ async function payloadHash(e){
   const body=new TextEncoder().encode(jcsEntryCore(e));
   return bytesToHex(await sha256(concat(CHAIN_DOMAIN,body)));
 }
+// Optional walk-back: prior entries (ascending seq) must each recompute their
+// payload_hash and hash-link to the next (entry[n].prev_entry_hash ==
+// payload_hash(entry[n-1])), ending at the head's prev_entry_hash.
+async function verifyChainLinks(links, head){
+  if(!links||!links.length) return { ok:true, detail:"" };
+  const chain=links.concat([head]); let prevPh=null;
+  for(const e of chain){
+    const ph=await payloadHash(e);
+    if(e!==head && !eqHex(ph,e.payload_hash||""))
+      return { ok:false, detail:"link seq "+e.seq+": payload_hash does not recompute" };
+    if(prevPh!==null && !eqHex(e.prev_entry_hash||"",prevPh))
+      return { ok:false, detail:"link seq "+e.seq+": prev_entry_hash ≠ payload_hash(seq "+(e.seq-1)+")" };
+    prevPh=ph;
+  }
+  return { ok:true, detail:"walked "+links.length+" prior entr"+(links.length===1?"y":"ies")+" + head: hash-linkage holds" };
+}
 
 /* ---------- §2.1 preimage: original → leaf_bytes (link A) ---------- */
 function jcsObj(o){ // sorted keys, compact; values are strings in our schemes
@@ -397,7 +413,10 @@ async function verify(){
       "cannot cryptographically bind OP_RETURN to the txid. Trust level reduced.");
   }
 
-  // §5 chain (optional)
+  // §5 chain (optional) — per-exchange tamper-evident continuity (link D).
+  // Content-consistency is cryptographic and DOES gate the verdict; on-chain
+  // confirmation (§4.3) stays separate so a content-valid head can be reported
+  // while its Bitcoin confirmation is still pending.
   if(bundle.chain && bundle.chain.entry){
     try {
       const e=bundle.chain.entry;
@@ -405,12 +424,14 @@ async function verify(){
       const phOk=eqHex(ph,e.payload_hash);
       // body_hash for daily must equal the merkle root
       const bodyOk=(e.kind!=="daily")||(merkleRoot && eqHex(e.body_hash,merkleRoot));
-      const ok=phOk&&bodyOk;
-      renderStep(ok?"ok":"warn","4 · Chain entry — payload_hash "+(phOk?"recomputes ✓":"MISMATCH ✕")+
-        (bodyOk?"":" · body_hash ≠ merkle root"),
-        "seq "+e.seq+" ("+e.kind+") prev="+(e.prev_entry_hash||"").slice(0,16)+"…<br>recomputed payload_hash: "+ph);
-      // content-consistency is reported separately and does NOT gate the core verdict
-    } catch(e){ renderStep("warn","4 · Chain entry — error","//"+e.message); }
+      const link=await verifyChainLinks(bundle.chain.links||[], e); // optional walk-back
+      const ok=phOk&&bodyOk&&link.ok;
+      let extra=""; if(!bodyOk) extra+=" · body_hash ≠ merkle root"; if(!link.ok) extra+=" · prev-entry link broken";
+      let detail="seq "+e.seq+" ("+e.kind+") prev="+(e.prev_entry_hash||"").slice(0,16)+"…<br>recomputed payload_hash: "+ph;
+      if(link.detail) detail+="<br>"+link.detail;
+      renderStep(ok?"ok":"bad","4 · Chain entry — payload_hash "+(phOk?"recomputes ✓":"MISMATCH ✕")+extra, detail);
+      allOk=allOk&&ok;
+    } catch(e){ allOk=false; renderStep("bad","4 · Chain entry — error","//"+e.message); }
   }
 
   // on-chain panel

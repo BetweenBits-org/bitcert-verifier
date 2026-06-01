@@ -18,5 +18,9 @@ check "02 self-consistency"   0 $CLI 02-daily-balance/bundle.json
 check "02 identity binding"   0 $CLI 02-daily-balance/bundle.json --account alice@demoex --salt 5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e
 echo "== 03 tampered-original (link A must catch it) =="
 check "03 tampered original"  1 $CLI 03-tampered-original/bundle.json --original 03-tampered-original/tampered-report.txt
+echo "== 04 tampered-chain (link D / §5 must catch it) =="
+check "04 tampered chain"     1 $CLI 04-tampered-chain/bundle.json
+echo "== 05 daily-chain-walkback (§5 continuity via chain.links) =="
+check "05 chain walk-back"    0 $CLI 05-daily-chain-walkback/bundle.json --account alice@demoex --salt 5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e
 
 echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"; exit 1; }

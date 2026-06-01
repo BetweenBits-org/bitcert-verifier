@@ -92,7 +92,15 @@ def assemble_bundle(leaf0_preimage, preimage_decl, record_kind, descriptor,
              "business_date": descriptor.get("business_date", "2026-05-28")}
         e["payload_hash"] = V.payload_hash(e)
         bundle["chain"] = {"entry": e}
-    return bundle
+    return bundle, root
+
+def prior_daily_entry(exchange_id, seq, business_date, body_hash, prev_entry_hash):
+    """A self-consistent prior chain entry for §5 walk-back links."""
+    e = {"exchange_id": exchange_id, "seq": seq, "kind": "daily",
+         "prev_entry_hash": prev_entry_hash, "body_hash": body_hash,
+         "business_date": business_date}
+    e["payload_hash"] = V.payload_hash(e)
+    return e
 
 # ---------------- scenario data ----------------
 # 01 — file artifact
@@ -125,7 +133,7 @@ def jdump(obj):
 
 def main():
     # ---- examples/01 — file artifact ----
-    b01 = assemble_bundle(ART_LEAF, file_preimage(), "attestation",
+    b01, _r01 = assemble_bundle(ART_LEAF, file_preimage(), "attestation",
                           {"exchange_id": "demoex", "business_date": "2026-05-28"}, chain=False)
     w(os.path.join(EX, "01-attestation-file", "bundle.json"), jdump(b01))
     w(os.path.join(EX, "01-attestation-file", "original-report.txt"), ARTIFACT)
@@ -140,7 +148,7 @@ def main():
       "what was anchored.\n")
 
     # ---- examples/02 — daily balance ----
-    b02 = assemble_bundle(DAILY_LEAF, daily_preimage(), "daily",
+    b02, root02 = assemble_bundle(DAILY_LEAF, daily_preimage(), "daily",
                           {"exchange_id": "demoex", "business_date": "2026-05-28"}, chain=True)
     w(os.path.join(EX, "02-daily-balance", "bundle.json"), jdump(b02))
     w(os.path.join(EX, "02-daily-balance", "customer-secret.txt"),
@@ -177,6 +185,55 @@ def main():
       "Expected: step 0 ✗ → **VERIFICATION FAILED** (exit 1). This is link A doing its "
       "job: proving the *content* you hold is the one that was anchored.\n")
 
+    # ---- examples/04 — tampered chain (link D / §5 must catch it) ----
+    # Same anchored daily bundle as 02, but the per-exchange chain entry's
+    # payload_hash was forged. Links A/B/C still pass, yet the chain entry no
+    # longer recomputes — so §5 (now gating) FAILS the bundle.
+    b04 = json.loads(jdump(b02))
+    b04["chain"]["entry"]["payload_hash"] = "ff" * 32
+    w(os.path.join(EX, "04-tampered-chain", "bundle.json"), jdump(b04))
+    w(os.path.join(EX, "04-tampered-chain", "expected.txt"), "FAILED (exit 1)\n")
+    w(os.path.join(EX, "04-tampered-chain", "README.md"),
+      "# 04 · Tampered per-exchange chain is caught (link D · §5)\n\n"
+      "Same anchored daily bundle as example 02, but the chain entry's "
+      "`payload_hash` was forged. Links A/B/C (preimage + Merkle + Bitcoin) all "
+      "still pass — the day's Merkle root really is anchored — yet the §5 chain "
+      "entry no longer recomputes from its preimage, so step 4 FAILS.\n\n"
+      "`payload_hash = SHA-256(\"bitcert:chain:v1\\n\" || JCS(entry_core))` — the "
+      "verifier recomputes it and also checks `body_hash == merkle.root` for a "
+      "daily entry. Both are cryptographic and gate the verdict.\n\n```bash\n"
+      "python3 ../../verify-cli/verify.py bundle.json\n```\n\n"
+      "Expected: step 4 ✗ → **VERIFICATION FAILED** (exit 1).\n")
+
+    # ---- examples/05 — daily chain walk-back (§5 continuity / links) ----
+    # A two-day chain: yesterday (seq 1, genesis prev=zeros) → today (seq 2),
+    # where today.prev_entry_hash == payload_hash(yesterday). today's body_hash
+    # carries the same Merkle root as 02 (so links B/C stay valid), and the prior
+    # entry rides along in chain.links so the verifier can walk the linkage.
+    b05 = json.loads(jdump(b02))
+    y4 = prior_daily_entry("demoex", 1, "2026-05-27", "be" * 32, "00" * 32)
+    today = {"exchange_id": "demoex", "seq": 2, "kind": "daily",
+             "prev_entry_hash": y4["payload_hash"], "body_hash": root02.hex(),
+             "business_date": "2026-05-28"}
+    today["payload_hash"] = V.payload_hash(today)
+    b05["chain"] = {"entry": today, "links": [y4]}
+    w(os.path.join(EX, "05-daily-chain-walkback", "bundle.json"), jdump(b05))
+    w(os.path.join(EX, "05-daily-chain-walkback", "customer-secret.txt"),
+      "# Held PRIVATELY by the customer (NOT in the public bundle).\n"
+      "account_id=%s\nsalt_hex=%s\n" % (ACCOUNT, SALT_HEX))
+    w(os.path.join(EX, "05-daily-chain-walkback", "expected.txt"), "VERIFIED (exit 0)\n")
+    w(os.path.join(EX, "05-daily-chain-walkback", "README.md"),
+      "# 05 · Daily chain walk-back (§5 continuity via `chain.links`)\n\n"
+      "A two-day per-exchange chain. The head entry is today (seq 2); yesterday "
+      "(seq 1) rides along in `chain.links`. The verifier confirms each prior "
+      "entry recomputes its own `payload_hash` and that "
+      "`today.prev_entry_hash == payload_hash(yesterday)` — the tamper-evident "
+      "hash linkage that makes a per-exchange chain auditable.\n\n```bash\n"
+      "python3 ../../verify-cli/verify.py bundle.json --account %s --salt %s\n```\n\n"
+      "Expected: every check ✓ → **VERIFIED**, with step 4 reporting `walked 1 "
+      "prior entry + head: hash-linkage holds`. Flip any byte of the linked "
+      "entry and step 4 FAILS.\n" % (ACCOUNT, SALT_HEX))
+
     # ---- examples/run.sh ----
     run = """#!/usr/bin/env bash
 # Runs every example through the offline verifier and asserts the expected result.
@@ -198,9 +255,13 @@ check "02 self-consistency"   0 $CLI 02-daily-balance/bundle.json
 check "02 identity binding"   0 $CLI 02-daily-balance/bundle.json --account alice@demoex --salt %s
 echo "== 03 tampered-original (link A must catch it) =="
 check "03 tampered original"  1 $CLI 03-tampered-original/bundle.json --original 03-tampered-original/tampered-report.txt
+echo "== 04 tampered-chain (link D / §5 must catch it) =="
+check "04 tampered chain"     1 $CLI 04-tampered-chain/bundle.json
+echo "== 05 daily-chain-walkback (§5 continuity via chain.links) =="
+check "05 chain walk-back"    0 $CLI 05-daily-chain-walkback/bundle.json --account alice@demoex --salt %s
 
 echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"; exit 1; }
-""" % SALT_HEX
+""" % (SALT_HEX, SALT_HEX)
     run_path = os.path.join(EX, "run.sh")
     w(run_path, run)
     os.chmod(run_path, 0o755)
@@ -209,6 +270,9 @@ echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"
     w(os.path.join(HERE, "sample-bundle.valid.json"), jdump(b02))           # daily, jcs preimage
     tampered = json.loads(jdump(b02)); tampered["record"]["leaf_bytes"] = "ff" * 32
     w(os.path.join(HERE, "sample-bundle.tampered.json"), jdump(tampered))
+    # forged §5 chain entry: links A/B/C pass, chain payload_hash does not recompute
+    tampered_chain = json.loads(jdump(b02)); tampered_chain["chain"]["entry"]["payload_hash"] = "ff" * 32
+    w(os.path.join(HERE, "sample-bundle.tampered-chain.json"), jdump(tampered_chain))
 
     # ---- inline the daily sample into index.html ----
     html_path = os.path.join(ROOT, "index.html")
