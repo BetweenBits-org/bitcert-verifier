@@ -68,6 +68,8 @@
   footer { color:var(--muted); font-size:12.5px; margin-top:26px; line-height:1.7; }
   a { color:var(--accent); }
   .hint { font-size:12.5px; color:var(--muted); margin-top:6px; }
+  details.card > summary { font-weight:600; cursor:pointer; }
+  details.card > summary .kv { font-weight:400; }
 </style>
 </head>
 <body>
@@ -94,22 +96,30 @@
       (on-chain confirmation) is optional and uses a Bitcoin source you choose.</div>
   </div>
 
-  <div class="card">
-    <label class="h">0 · Original record <span class="kv">(optional · link A — proves the leaf is really YOUR record)</span></label>
-    <p class="hint" style="margin-top:0">Without this, the verifier proves a 32-byte digest is anchored.
-      Supply your original below to also prove that digest is your document or balance.</p>
-    <div class="row">
+  <details class="card">
+    <summary>0 · Original record <span class="kv">— optional · advanced (link A)</span></summary>
+    <p class="hint" style="margin-top:10px">
+      <b>You usually don't need this.</b> Step 1 below already recomputes the leaf
+      from the record carried in the bundle — for a daily balance that means the
+      asset, amount and commitment shown ARE what was anchored, with no input here.
+      Open this only to add a binding the bundle can't carry by itself:</p>
+    <div class="kv" style="margin-top:10px; margin-bottom:4px">
+      ① original <b>file</b> (PDF/report) — required to check <b>sha256-file</b> document proofs</div>
+    <div class="row" style="margin-top:0">
       <div style="flex:1; min-width:240px">
-        <div class="kv" style="margin-bottom:4px">file artifact (PDF/report) — for <b>sha256-file</b></div>
         <input id="origfile" type="file">
       </div>
     </div>
-    <div class="row">
-      <input id="acct" type="text" placeholder="account id — for sha256-jcs-fields (daily balance)">
-      <input id="salt" type="text" placeholder="your private salt (hex) — never in the bundle">
+    <div class="kv" style="margin-top:14px; margin-bottom:4px">
+      ② <b>account id + private salt</b> — optional, proves a <b>sha256-jcs-fields</b> balance is <i>yours</i></div>
+    <div class="row" style="margin-top:0">
+      <input id="acct" type="text" placeholder="account id">
+      <input id="salt" type="text" placeholder="private salt (hex) — never in the bundle">
     </div>
-    <div class="hint">The salt is your secret; it is intentionally not part of the public bundle.</div>
-  </div>
+    <div class="hint">The salt is a secret issued per account; it is intentionally
+      not in the public bundle, so proving identity is strictly opt-in. A daily
+      balance verifies fully without it.</div>
+  </details>
 
   <div id="steps"></div>
 
@@ -272,6 +282,22 @@ async function payloadHash(e){
   const body=new TextEncoder().encode(jcsEntryCore(e));
   return bytesToHex(await sha256(concat(CHAIN_DOMAIN,body)));
 }
+// Optional walk-back: prior entries (ascending seq) must each recompute their
+// payload_hash and hash-link to the next (entry[n].prev_entry_hash ==
+// payload_hash(entry[n-1])), ending at the head's prev_entry_hash.
+async function verifyChainLinks(links, head){
+  if(!links||!links.length) return { ok:true, detail:"" };
+  const chain=links.concat([head]); let prevPh=null;
+  for(const e of chain){
+    const ph=await payloadHash(e);
+    if(e!==head && !eqHex(ph,e.payload_hash||""))
+      return { ok:false, detail:"link seq "+e.seq+": payload_hash does not recompute" };
+    if(prevPh!==null && !eqHex(e.prev_entry_hash||"",prevPh))
+      return { ok:false, detail:"link seq "+e.seq+": prev_entry_hash ≠ payload_hash(seq "+(e.seq-1)+")" };
+    prevPh=ph;
+  }
+  return { ok:true, detail:"walked "+links.length+" prior entr"+(links.length===1?"y":"ies")+" + head: hash-linkage holds" };
+}
 
 /* ---------- §2.1 preimage: original → leaf_bytes (link A) ---------- */
 function jcsObj(o){ // sorted keys, compact; values are strings in our schemes
@@ -397,7 +423,10 @@ async function verify(){
       "cannot cryptographically bind OP_RETURN to the txid. Trust level reduced.");
   }
 
-  // §5 chain (optional)
+  // §5 chain (optional) — per-exchange tamper-evident continuity (link D).
+  // Content-consistency is cryptographic and DOES gate the verdict; on-chain
+  // confirmation (§4.3) stays separate so a content-valid head can be reported
+  // while its Bitcoin confirmation is still pending.
   if(bundle.chain && bundle.chain.entry){
     try {
       const e=bundle.chain.entry;
@@ -405,12 +434,14 @@ async function verify(){
       const phOk=eqHex(ph,e.payload_hash);
       // body_hash for daily must equal the merkle root
       const bodyOk=(e.kind!=="daily")||(merkleRoot && eqHex(e.body_hash,merkleRoot));
-      const ok=phOk&&bodyOk;
-      renderStep(ok?"ok":"warn","4 · Chain entry — payload_hash "+(phOk?"recomputes ✓":"MISMATCH ✕")+
-        (bodyOk?"":" · body_hash ≠ merkle root"),
-        "seq "+e.seq+" ("+e.kind+") prev="+(e.prev_entry_hash||"").slice(0,16)+"…<br>recomputed payload_hash: "+ph);
-      // content-consistency is reported separately and does NOT gate the core verdict
-    } catch(e){ renderStep("warn","4 · Chain entry — error","//"+e.message); }
+      const link=await verifyChainLinks(bundle.chain.links||[], e); // optional walk-back
+      const ok=phOk&&bodyOk&&link.ok;
+      let extra=""; if(!bodyOk) extra+=" · body_hash ≠ merkle root"; if(!link.ok) extra+=" · prev-entry link broken";
+      let detail="seq "+e.seq+" ("+e.kind+") prev="+(e.prev_entry_hash||"").slice(0,16)+"…<br>recomputed payload_hash: "+ph;
+      if(link.detail) detail+="<br>"+link.detail;
+      renderStep(ok?"ok":"bad","4 · Chain entry — payload_hash "+(phOk?"recomputes ✓":"MISMATCH ✕")+extra, detail);
+      allOk=allOk&&ok;
+    } catch(e){ allOk=false; renderStep("bad","4 · Chain entry — error","//"+e.message); }
   }
 
   // on-chain panel

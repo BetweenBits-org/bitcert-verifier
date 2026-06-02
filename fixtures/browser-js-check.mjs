@@ -16,7 +16,7 @@ const pure = script.slice(0, cut);
 
 const factory = new Function(
   pure + "\nreturn {hexToBytes,bytesToHex,verifyMerkle,decodeOpReturn,txidFromRaw," +
-         "payloadHash,verifyPreimage,eqHex};"
+         "payloadHash,verifyChainLinks,verifyPreimage,eqHex};"
 );
 const F = factory();
 
@@ -29,6 +29,7 @@ function expect(cond, msg) { if (!cond) { console.log("  ✗ " + msg); failures+
 
 const valid = load("sample-bundle.valid.json");
 const tampered = load("sample-bundle.tampered.json");
+const tamperedChain = load("sample-bundle.tampered-chain.json");
 
 console.log("browser-js vs fixtures:");
 {
@@ -45,6 +46,20 @@ console.log("browser-js vs fixtures:");
 {
   const m = await F.verifyMerkle(tampered.record, tampered.merkle);
   expect(!m.ok, "tampered: merkle inclusion correctly FAILS");
+}
+// §5 chain (link D) — browser JS must gate just like Python
+{
+  const ph = await F.payloadHash(tamperedChain.chain.entry);
+  expect(!F.eqHex(ph, tamperedChain.chain.entry.payload_hash), "tampered-chain: payload_hash correctly does NOT recompute");
+  // walk-back continuity: a forged linked entry must break the linkage
+  const head = valid.chain.entry;
+  const goodPrior = { exchange_id: "demoex", seq: 0, kind: "daily",
+    prev_entry_hash: "00".repeat(32), body_hash: "be".repeat(32), business_date: "2026-05-27" };
+  goodPrior.payload_hash = await F.payloadHash(goodPrior);
+  const linkedHead = { ...head, seq: 1, prev_entry_hash: goodPrior.payload_hash };
+  expect((await F.verifyChainLinks([goodPrior], linkedHead)).ok, "chain links: clean walk-back hash-linkage holds");
+  const forgedPrior = { ...goodPrior, payload_hash: "ff".repeat(32) };
+  expect(!(await F.verifyChainLinks([forgedPrior], linkedHead)).ok, "chain links: forged prior entry correctly breaks continuity");
 }
 // pinned RFC-6962 test vector must match merkle-batching
 {

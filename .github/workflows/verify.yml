@@ -35,6 +35,14 @@ jobs:
             echo "tampered correctly rejected"
           fi
 
+      - name: CLI — tampered §5 chain bundle must FAIL
+        run: |
+          if python3 verify-cli/verify.py fixtures/sample-bundle.tampered-chain.json; then
+            echo "::error::tampered-chain bundle unexpectedly verified" && exit 1
+          else
+            echo "tampered chain correctly rejected"
+          fi
+
       - name: Browser JS == Python == ann-core test vector
         run: node fixtures/browser-js-check.mjs
 
