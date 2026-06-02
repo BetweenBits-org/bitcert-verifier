@@ -68,6 +68,8 @@
   footer { color:var(--muted); font-size:12.5px; margin-top:26px; line-height:1.7; }
   a { color:var(--accent); }
   .hint { font-size:12.5px; color:var(--muted); margin-top:6px; }
+  details.card > summary { font-weight:600; cursor:pointer; }
+  details.card > summary .kv { font-weight:400; }
 </style>
 </head>
 <body>
@@ -94,22 +96,30 @@
       (on-chain confirmation) is optional and uses a Bitcoin source you choose.</div>
   </div>
 
-  <div class="card">
-    <label class="h">0 · Original record <span class="kv">(optional · link A — proves the leaf is really YOUR record)</span></label>
-    <p class="hint" style="margin-top:0">Without this, the verifier proves a 32-byte digest is anchored.
-      Supply your original below to also prove that digest is your document or balance.</p>
-    <div class="row">
+  <details class="card">
+    <summary>0 · Original record <span class="kv">— optional · advanced (link A)</span></summary>
+    <p class="hint" style="margin-top:10px">
+      <b>You usually don't need this.</b> Step 1 below already recomputes the leaf
+      from the record carried in the bundle — for a daily balance that means the
+      asset, amount and commitment shown ARE what was anchored, with no input here.
+      Open this only to add a binding the bundle can't carry by itself:</p>
+    <div class="kv" style="margin-top:10px; margin-bottom:4px">
+      ① original <b>file</b> (PDF/report) — required to check <b>sha256-file</b> document proofs</div>
+    <div class="row" style="margin-top:0">
       <div style="flex:1; min-width:240px">
-        <div class="kv" style="margin-bottom:4px">file artifact (PDF/report) — for <b>sha256-file</b></div>
         <input id="origfile" type="file">
       </div>
     </div>
-    <div class="row">
-      <input id="acct" type="text" placeholder="account id — for sha256-jcs-fields (daily balance)">
-      <input id="salt" type="text" placeholder="your private salt (hex) — never in the bundle">
+    <div class="kv" style="margin-top:14px; margin-bottom:4px">
+      ② <b>account id + private salt</b> — optional, proves a <b>sha256-jcs-fields</b> balance is <i>yours</i></div>
+    <div class="row" style="margin-top:0">
+      <input id="acct" type="text" placeholder="account id">
+      <input id="salt" type="text" placeholder="private salt (hex) — never in the bundle">
     </div>
-    <div class="hint">The salt is your secret; it is intentionally not part of the public bundle.</div>
-  </div>
+    <div class="hint">The salt is a secret issued per account; it is intentionally
+      not in the public bundle, so proving identity is strictly opt-in. A daily
+      balance verifies fully without it.</div>
+  </details>
 
   <div id="steps"></div>
 
