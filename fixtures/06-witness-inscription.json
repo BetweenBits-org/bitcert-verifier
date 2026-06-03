@@ -1,0 +1,26 @@
+{
+  "schema": "bitcert-proof-bundle/v1",
+  "bitcoin_network": "regtest",
+  "generated_at": "2026-06-03T00:00:00Z",
+  "record": {
+    "kind": "attestation",
+    "leaf_bytes": "280149b23f3f7cc01d49b7763a23af99b55b9fbeff3bee81cf607187de65f283",
+    "preimage": {
+      "scheme": "sha256-file",
+      "content_type": "application/json"
+    },
+    "descriptor": {
+      "note": "demo witness inscription via BitSign module (generic primitive)"
+    }
+  },
+  "anchor": {
+    "reveal_txid": "9bda9391bd386a976bd5b2157444613e054c8973a55d568ddda3ba34cce2ed0d",
+    "reveal_tx_hex": "0200000000010190a040844c83073f0ab89270ebefb37029ac9f897dcffc2295c22edfaf0de2170100000000fdffffff020000000000000000226a20280149b23f3f7cc01d49b7763a23af99b55b9fbeff3bee81cf607187de65f283e80300000000000016001456e11f8d7b838f056ee2682f7090fe604fdb995503400e5febbd258ce93c072867f32be391e9e982e91443aa8db6693807a531a3bd8863454bf8d2a452b8adf3f1d375005853be4d24a0c5226f9b2130bcbe1b1df9146d205be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42cac00630462637274106170706c69636174696f6e2f6a736f6e317b226d6f64756c65223a226269747369676e222c22646f63223a2264656d6f206d616e6966657374222c226e223a34327d6821c15be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c00000000",
+    "op_return_payload_hex": "280149b23f3f7cc01d49b7763a23af99b55b9fbeff3bee81cf607187de65f283",
+    "witness_envelope": {
+      "input_index": 0,
+      "content_type": "application/json",
+      "protocol_tag": "bcrt"
+    }
+  }
+}

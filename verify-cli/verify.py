@@ -155,6 +155,137 @@ def txid_from_raw(hex_str):
             opret = p.hex(); break
     return txid, opret
 
+# ----- §6 witness inscription (the original bytes live IN the reveal witness) -----
+def extract_witness_items(hex_str, input_index):
+    """Return the list of witness stack elements for `input_index`, or None for a
+    non-segwit tx. The witness is NOT in the txid (malleable) — callers MUST bind
+    the recovered bytes to record.leaf_bytes (which IS txid-committed via the
+    OP_RETURN), never trust the witness alone."""
+    r = _R(bytes.fromhex(hex_str))
+    r.take(4)                                  # version
+    if r.b[r.o:r.o + 2] != b"\x00\x01":        # not segwit -> no witness
+        return None
+    r.take(2)                                  # marker + flag
+    vin = r.varint()
+    for _ in range(vin):
+        r.take(32); r.take(4)
+        r.take(r.varint()); r.take(4)          # scriptSig + sequence
+    vout = r.varint()
+    for _ in range(vout):
+        r.take(8); r.take(r.varint())          # value + scriptPubKey
+    witnesses = []
+    for _ in range(vin):
+        items = [r.take(r.varint()) for _ in range(r.varint())]
+        witnesses.append(items)
+    if input_index >= len(witnesses):
+        return None
+    return witnesses[input_index]
+
+def parse_envelope(script):
+    """Walk the inscription tapscript and recover (tag, content_type, body).
+    Pushes inside the OP_IF..OP_ENDIF block are [tag, content_type, body chunks…];
+    the body is their plain concatenation (bcrt framing, <=520B chunks)."""
+    o, n, collecting, pushes = 0, len(script), False, []
+    while o < n:
+        op = script[o]; o += 1
+        data = None
+        if op <= 0x4b:
+            data = script[o:o + op]; o += op
+        elif op == 0x4c:
+            ln = script[o]; o += 1; data = script[o:o + ln]; o += ln
+        elif op == 0x4d:
+            ln = int.from_bytes(script[o:o + 2], "little"); o += 2; data = script[o:o + ln]; o += ln
+        elif op == 0x4e:
+            ln = int.from_bytes(script[o:o + 4], "little"); o += 4; data = script[o:o + ln]; o += ln
+        elif op == 0x63:                        # OP_IF
+            collecting = True
+        elif op == 0x68:                        # OP_ENDIF
+            collecting = False
+        if data is not None and collecting:
+            pushes.append(data)
+    if len(pushes) < 2:
+        return None
+    return pushes[0], pushes[1], b"".join(pushes[2:])
+
+def verify_witness_bundle(bundle, explorer=None):
+    """Verify a witness-INSCRIBED record: the original bytes are recovered from
+    the reveal tx WITNESS (no off-bundle file needed) and bound to
+    record.leaf_bytes — which equals the txid-committed OP_RETURN root. A
+    tampered witness body fails the bind; a swapped tx fails the txid check."""
+    anchor, record = bundle["anchor"], bundle["record"]
+    wit = anchor["witness_envelope"]
+    leaf = record["leaf_bytes"].lower()
+    raw = anchor.get("reveal_tx_hex")
+    all_ok = True
+
+    if not raw:
+        _line("bad", "1 · Transaction binding — no reveal_tx_hex",
+              "a witness bundle cannot be verified without the raw reveal tx")
+        return False
+    try:
+        computed_txid, opret = txid_from_raw(raw)
+        txid_ok = computed_txid.lower() == (anchor.get("reveal_txid") or "").lower()
+        op_ok = (opret or "").lower() == anchor["op_return_payload_hex"].lower()
+        _line("ok" if txid_ok and op_ok else "bad",
+              "1 · Transaction binding — OP_RETURN %s reveal_txid" %
+              ("belongs to" if txid_ok and op_ok else "does NOT match"),
+              "computed txid: %s\nbundle  txid: %s" % (computed_txid, anchor.get("reveal_txid")))
+        all_ok &= txid_ok and op_ok
+    except Exception as e:
+        _line("bad", "1 · Transaction binding — error", str(e)); return False
+
+    # The inscribed document IS the directly-committed leaf: OP_RETURN == leaf_bytes.
+    root_ok = (opret or "").lower() == leaf
+    _line("ok" if root_ok else "bad",
+          "2 · On-chain commitment — OP_RETURN root %s record.leaf_bytes" %
+          ("== " if root_ok else "≠ "),
+          "on-chain root: %s" % (opret or ""))
+    all_ok &= root_ok
+
+    # THE headline: recover the original from the witness, bind to leaf_bytes.
+    try:
+        items = extract_witness_items(raw, int(wit.get("input_index", 0)))
+        if not items or len(items) < 2:
+            raise ValueError("input has no script-path witness ([sig, script, control])")
+        env = parse_envelope(items[1])
+        if not env:
+            raise ValueError("witness[1] is not an OP_FALSE OP_IF inscription envelope")
+        tag, ct, body = env
+        body_hash = sha256(body).hex()
+        bound = (body_hash == leaf)             # bind to record.leaf_bytes, NOT self-declared
+        detail = ("recovered %d bytes straight from the Bitcoin witness\n"
+                  "content_type: %s\nprotocol_tag: %s\nsha256(body): %s"
+                  % (len(body), ct.decode("latin1", "replace"),
+                     tag.decode("latin1", "replace"), body_hash))
+        _line("ok" if bound else "bad",
+              "3 · Witness original — recovered bytes %s record.leaf_bytes" %
+              ("bind to" if bound else "do NOT bind to"), detail)
+        all_ok &= bound
+    except Exception as e:
+        _line("bad", "3 · Witness original — error", str(e)); return False
+
+    if explorer:
+        try:
+            confirmed, st = check_on_chain(explorer, computed_txid)
+            _line("ok" if confirmed else "warn",
+                  "4 · On-chain — %s via %s" % ("confirmed" if confirmed else "seen, unconfirmed", explorer),
+                  "block height %s" % st.get("block_height"))
+        except Exception as e:
+            _line("warn", "4 · On-chain — could not reach explorer",
+                  "%s\nsteps 1–3 are already proven offline" % e)
+    else:
+        _line("skip", "4 · On-chain confirmation — SKIPPED (offline / no --explorer)",
+              "txid bound above: %s" % computed_txid)
+
+    print()
+    if all_ok:
+        print("%s✓ CRYPTOGRAPHICALLY VERIFIED (offline) — original recovered from the Bitcoin witness%s" % (OK, RST))
+        print("  No BitCert server, no off-bundle file: the document IS on Bitcoin (tx %s)." % computed_txid)
+    else:
+        print("%s✗ VERIFICATION FAILED%s" % (BAD, RST))
+        print("  This witness bundle does not prove what it claims.")
+    return all_ok
+
 # ----- §5 chain continuity -----
 def _jcs_entry_core(e):
     # RFC-8785 subset: sorted keys, compact separators.
@@ -251,6 +382,12 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
         _line("bad", "Unsupported schema", "expected %s, got %r" % (SCHEMA, bundle.get("schema")))
         return False
     _line("ok", "Schema %s · network: %s" % (bundle["schema"], bundle.get("bitcoin_network", "?")))
+
+    # Witness-inscription bundles carry the original IN the reveal witness; they
+    # verify via a dedicated path (bind recovered bytes -> record.leaf_bytes).
+    if bundle.get("anchor", {}).get("witness_envelope"):
+        return verify_witness_bundle(bundle, explorer)
+
     all_ok = True
 
     # §2.1 preimage — original record -> leaf_bytes (link A)

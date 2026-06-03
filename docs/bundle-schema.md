@@ -246,6 +246,58 @@ The `anchor.confirmed` block in the bundle is only a *claim*; a strict verifier
 re-fetches and ignores it. Offline runs report steps §3, §4.1, §4.2 as proven and
 mark §4.3 as `SKIPPED (no Bitcoin source)`.
 
+### 4.4 `witness_envelope` — original bytes inscribed IN the reveal witness (OPTIONAL, additive)
+
+For an **inscribed** record the original document is not supplied off-bundle — it
+rides in the reveal transaction's **witness** (a BIP-342 tapscript envelope). The
+bundle stays self-contained: anyone can recover the original from the chain alone.
+
+```jsonc
+"anchor": {
+  …,
+  "op_return_payload_hex": "…(64 hex = 32B)",   // = record.leaf_bytes (the inscribed doc IS the committed leaf)
+  "reveal_tx_hex": "0200…",                       // REQUIRED — its witness carries the body
+  "witness_envelope": {                           // presence selects the witness-verification path
+    "input_index": 0,                             // which input's witness holds the envelope
+    "content_type": "application/pdf",            // GENERIC / opaque — informational only
+    "protocol_tag": "bcrt"                         // informational only
+  }
+}
+```
+
+**On-chain envelope layout** (in `witness[input_index][1]`, the tapscript):
+
+```
+<x-only pubkey> OP_CHECKSIG OP_FALSE OP_IF <protocol_tag> <content_type> <body 520B-chunks…> OP_ENDIF
+```
+
+The witness stack is `[schnorr_sig, inscription_script, control_block]` (3 elements).
+The body is the **plain concatenation** of the pushes after `content_type`, inside
+the `OP_IF … OP_ENDIF` block.
+
+**Verification (the load-bearing rule):**
+
+```
+1. txid(reveal_tx_hex) == anchor.reveal_txid                      (§4.2 — txid binding)
+2. OP_RETURN(reveal_tx_hex) == op_return_payload_hex == leaf_bytes (the doc IS the committed leaf)
+3. body = concat(envelope pushes after content_type)
+   ASSERT  sha256(body) == record.leaf_bytes        ← bind to leaf_bytes, FAIL on mismatch
+4. (optional §4.3) confirm reveal_txid on a Bitcoin source of your choosing
+```
+
+> **Why bind to `record.leaf_bytes` and NOT a self-declared value:** the witness is
+> **not committed in the txid** (it is malleable). `record.leaf_bytes` IS committed —
+> it equals the OP_RETURN payload, which is in the txid-bound (non-witness) part and
+> confirmed on-chain. So a tampered witness body fails step 3 while leaving the txid
+> intact. A verifier that instead trusted `witness_envelope` for the expected hash
+> would be checking the data against itself (circular). `content_type` / `protocol_tag`
+> are informational — never trusted for the security decision, and `content_type`
+> MUST be HTML/URL-escaped before display (untrusted bytes).
+
+> **Privacy / one-way door:** inscribing is **irreversibly public and permanent**. Use
+> the witness path ONLY for `sha256-file`-style documents that are cleared for public
+> chain — **NEVER** for `sha256-jcs-fields` daily PII (customer balances/identifiers).
+
 ---
 
 ## 5. `chain` — per-exchange chaining (OPTIONAL, `v1-draft`)
