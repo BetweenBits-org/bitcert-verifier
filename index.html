@@ -383,9 +383,38 @@ async function verifyChainLinks(links, head){
 }
 
 /* ---------- §2.1 preimage: original → leaf_bytes (link A) ---------- */
-function jcsObj(o){ // sorted keys, compact; values are strings in our schemes
+function jcsObj(o){ // sorted keys, compact; values are strings/ints in our schemes
   const keys=Object.keys(o).sort();
   return "{"+keys.map(k=>JSON.stringify(k)+":"+JSON.stringify(o[k])).join(",")+"}";
+}
+
+/* ---------- §6 reconciliation commitment + day_root (v2) ----------
+   Byte-identical to services/daily-settlement/src/domain/anchor.rs + verify.py.
+   Reuses the flat jcsObj (sorted keys; numbers serialize bare), so all three
+   implementations agree on every byte. */
+const RECON_ASSETS_DOMAIN=new TextEncoder().encode("attest:daily:recon-assets\n");
+const RECON_DOMAIN=new TextEncoder().encode("attest:daily:recon\n");
+const DAY_ROOT_DOMAIN=new TextEncoder().encode("attest:daily:anchor\n");
+function assetRowJcs(a){
+  return jcsObj({asset:a.asset, ok:a.ok?1:0, residual:a.residual,
+                 scale:Number(a.scale), trust_actual:a.trust_actual, trust_required:a.trust_required});
+}
+async function assetsHash(assets){
+  const sorted=assets.slice().sort((x,y)=>x.asset<y.asset?-1:(x.asset>y.asset?1:0));
+  let acc=RECON_ASSETS_DOMAIN;
+  for(const a of sorted) acc=concat(acc,new TextEncoder().encode(assetRowJcs(a)));
+  return await sha256(acc);
+}
+async function reconCommitment(exchangeId, businessDate, ok, assets){
+  const ah=bytesToHex(await assetsHash(assets));
+  const body=new TextEncoder().encode(jcsObj({assets_hash:ah, business_date:businessDate,
+    exchange_id:exchangeId, reconciliation_ok:ok?1:0}));
+  return await sha256(concat(RECON_DOMAIN,body));
+}
+async function dayRoot(exchangeId, businessDate, balancesRootHex, reconCommitBytes){
+  const body=new TextEncoder().encode(jcsObj({balances_root:balancesRootHex, business_date:businessDate,
+    exchange_id:exchangeId, recon_commitment:bytesToHex(reconCommitBytes)}));
+  return await sha256(concat(DAY_ROOT_DOMAIN,body));
 }
 async function deriveUserCommitment(saltHex, account){
   return bytesToHex(await sha256(concat(hexToBytes(saltHex), new TextEncoder().encode(account))));
@@ -436,9 +465,9 @@ async function verify(){
   try { bundle=JSON.parse($("bundle").value); }
   catch(e){ verdict(false,"Not valid JSON","Paste a proof bundle JSON file."); return; }
 
-  if(bundle.schema!=="bitcert-proof-bundle/v1"){
+  if(bundle.schema!=="bitcert-proof-bundle/v1" && bundle.schema!=="bitcert-proof-bundle/v2"){
     verdict(false,"Unsupported bundle schema",
-      'Expected "bitcert-proof-bundle/v1", got '+JSON.stringify(bundle.schema)); return;
+      'Expected "bitcert-proof-bundle/v1" or "/v2", got '+JSON.stringify(bundle.schema)); return;
   }
   renderStep("ok","Schema "+bundle.schema+" · network: "+(bundle.bitcoin_network||"?"));
 
@@ -481,14 +510,28 @@ async function verify(){
     allOk=allOk&&m.ok;
   } catch(e){ allOk=false; renderStep("bad","1 · Merkle inclusion — error","//"+e.message); }
 
-  // §4.1 OP_RETURN commitment
-  let decoded=null;
+  // §4.1 OP_RETURN commitment — v2 commits day_root (binds the balance root AND
+  // the (a)/(b)/(c) reconciliation); v1 commits the bare Merkle root. The 32-byte
+  // slot is decoded.merkle_root in both. Branch on the reconciliation section.
+  let decoded=null, expectedDayRoot=null;
+  const reconSec=bundle.reconciliation;
   try {
     decoded=decodeOpReturn(bundle.anchor.op_return_payload_hex);
-    const ok=merkleRoot && eqHex(decoded.merkle_root,merkleRoot);
-    renderStep(ok?"ok":"bad","2 · OP_RETURN commitment — root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
-      "OP_RETURN merkle_root: "+decoded.merkle_root+(ok?"":"<br>does not equal the Merkle root above"));
-    allOk=allOk&&ok;
+    const anchored=decoded.merkle_root;
+    if(reconSec){
+      const ce=(bundle.chain&&bundle.chain.entry)||{};
+      const rc=await reconCommitment(ce.exchange_id, ce.business_date, reconSec.reconciliation_ok, reconSec.assets||[]);
+      expectedDayRoot=bytesToHex(await dayRoot(ce.exchange_id, ce.business_date, merkleRoot, rc));
+      const ok=merkleRoot && eqHex(expectedDayRoot,anchored);
+      renderStep(ok?"ok":"bad","2 · OP_RETURN commitment — day_root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
+        "OP_RETURN day_root:  "+anchored+"<br>recomputed day_root: "+expectedDayRoot+(ok?"":"<br>does not match"));
+      allOk=allOk&&ok;
+    } else {
+      const ok=merkleRoot && eqHex(anchored,merkleRoot);
+      renderStep(ok?"ok":"bad","2 · OP_RETURN commitment — root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
+        "OP_RETURN merkle_root: "+anchored+(ok?"":"<br>does not equal the Merkle root above"));
+      allOk=allOk&&ok;
+    }
   } catch(e){ allOk=false; renderStep("bad","2 · OP_RETURN commitment — error","//"+e.message); }
 
   // §4.2 offline txid binding
@@ -519,16 +562,33 @@ async function verify(){
       const e=bundle.chain.entry;
       const ph=await payloadHash(e);
       const phOk=eqHex(ph,e.payload_hash);
-      // body_hash for daily must equal the merkle root
-      const bodyOk=(e.kind!=="daily")||(merkleRoot && eqHex(e.body_hash,merkleRoot));
+      // body_hash for a daily link carries the anchored root: day_root (v2) or
+      // the bare Merkle root (v1).
+      const committedLabel=expectedDayRoot?"day_root":"merkle root";
+      let bodyOk;
+      if(e.kind!=="daily") bodyOk=true;
+      else if(expectedDayRoot) bodyOk=eqHex(e.body_hash,expectedDayRoot);
+      else bodyOk=merkleRoot && eqHex(e.body_hash,merkleRoot);
       const link=await verifyChainLinks(bundle.chain.links||[], e); // optional walk-back
       const ok=phOk&&bodyOk&&link.ok;
-      let extra=""; if(!bodyOk) extra+=" · body_hash ≠ merkle root"; if(!link.ok) extra+=" · prev-entry link broken";
+      let extra=""; if(!bodyOk) extra+=" · body_hash ≠ "+committedLabel; if(!link.ok) extra+=" · prev-entry link broken";
       let detail="seq "+e.seq+" ("+e.kind+") prev="+(e.prev_entry_hash||"").slice(0,16)+"…<br>recomputed payload_hash: "+ph;
       if(link.detail) detail+="<br>"+link.detail;
       renderStep(ok?"ok":"bad","4 · Chain entry — payload_hash "+(phOk?"recomputes ✓":"MISMATCH ✕")+extra, detail);
       allOk=allOk&&ok;
     } catch(e){ allOk=false; renderStep("bad","4 · Chain entry — error","//"+e.message); }
+  }
+
+  // §6 reconciliation (v2, informational) — the (a)/(b)/(c) the day_root commits
+  // to. Gated already by §2/§4.1 (day_root == OP_RETURN) + §5 (body_hash); this
+  // just renders the figures. The (a) reserve side is exchange-supplied.
+  if(bundle.reconciliation){
+    const rs=bundle.reconciliation, rows=rs.assets||[];
+    const tbl=rows.map(r=>"&nbsp;&nbsp;"+r.asset+" — (a) held="+r.trust_actual+" · (b) liab="+r.trust_required+
+      " · (c) resid="+r.residual+" "+(r.ok?"✓ covered":"✕ shortfall")).join("<br>");
+    renderStep(rs.reconciliation_ok?"ok":"warn","6 · Trust reconciliation (a−b=c) — "+rows.length+
+      " asset(s), "+(rs.reconciliation_ok?"all covered":"shortfall present"),
+      tbl+"<br>(a) reserve side is exchange-supplied, not independently measured.");
   }
 
   // on-chain panel
@@ -568,7 +628,7 @@ async function checkOnChain(){
 }
 
 /* sample bundle (regtest demo) — mirrors fixtures/sample-bundle.valid.json */
-const SAMPLE={"schema": "bitcert-proof-bundle/v1", "bitcoin_network": "regtest", "generated_at": "2026-05-29T09:00:00Z", "record": {"kind": "daily", "leaf_bytes": "648b0571d9ca1715258adbdaf020111bb486ae164edb6472e8f22408b5f91e05", "preimage": {"scheme": "sha256-jcs-fields", "domain": "attest:daily:leaf\n", "fields": {"asset": "BTC", "balance_minor": "150000000", "user_commitment": "fdd2290fb1bc5ab7c6932b17e478c38b1b4f39acee5ba391a7e691b118c055a4"}, "commitment": {"scheme": "sha256-salt-account", "account_field": "account_id"}}, "descriptor": {"exchange_id": "demoex", "business_date": "2026-05-28"}}, "merkle": {"leaf_index": 0, "root": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085", "siblings": ["aa968f99cf907d0981efbc226c01f268aae3fa318d4da0b8f3a869409ac11f11", "292216d8f9a369f521123ee787b0c13b825d984c09752c22e892a75d2caca214"], "directions": ["right", "right"]}, "anchor": {"reveal_txid": "d323c4ecc049b83d521e0b5ba9ec2de3e610fb34e49ed3c4a6c45dfe6b04e45c", "commit_txid": "0000000000000000000000000000000000000000000000000000000000000000", "reveal_tx_hex": "0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000fdffffff020000000000000000596a4c56424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d08500000000000000000000000000000000000000000000000000000000000000002823000000000000225120111111111111111111111111111111111111111111111111111111111111111101400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "op_return_payload_hex": "424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d0850000000000000000000000000000000000000000000000000000000000000000", "confirmed": {"block_height": 142, "block_hash": "0000000000000000000000000000000000000000000000000000000000000000", "confirmations": 6}}, "chain": {"entry": {"exchange_id": "demoex", "seq": 1, "kind": "daily", "prev_entry_hash": "0000000000000000000000000000000000000000000000000000000000000000", "body_hash": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085", "business_date": "2026-05-28", "payload_hash": "bc42cc550d147f5cfb06ec3d19fbb8c3e8d9684c98b2957a0fb22438b96a8af4"}}};
+const SAMPLE={"schema": "bitcert-proof-bundle/v2", "bitcoin_network": "regtest", "generated_at": "2026-05-29T09:00:00Z", "record": {"kind": "daily", "leaf_bytes": "648b0571d9ca1715258adbdaf020111bb486ae164edb6472e8f22408b5f91e05", "preimage": {"scheme": "sha256-jcs-fields", "domain": "attest:daily:leaf\n", "fields": {"asset": "BTC", "balance_minor": "150000000", "user_commitment": "fdd2290fb1bc5ab7c6932b17e478c38b1b4f39acee5ba391a7e691b118c055a4"}, "commitment": {"scheme": "sha256-salt-account", "account_field": "account_id"}}, "descriptor": {"exchange_id": "demoex", "business_date": "2026-05-28"}}, "merkle": {"leaf_index": 0, "root": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085", "siblings": ["aa968f99cf907d0981efbc226c01f268aae3fa318d4da0b8f3a869409ac11f11", "292216d8f9a369f521123ee787b0c13b825d984c09752c22e892a75d2caca214"], "directions": ["right", "right"]}, "anchor": {"reveal_txid": "9c6d87bf24ad431e79a05cb372dd21003d3392ee246f4f101bc147b1e666b80f", "commit_txid": "0000000000000000000000000000000000000000000000000000000000000000", "reveal_tx_hex": "0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000fdffffff020000000000000000596a4c56424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d500000000000000000000000000000000000000000000000000000000000000002823000000000000225120111111111111111111111111111111111111111111111111111111111111111101400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "op_return_payload_hex": "424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d50000000000000000000000000000000000000000000000000000000000000000", "confirmed": {"block_height": 142, "block_hash": "0000000000000000000000000000000000000000000000000000000000000000", "confirmations": 6}}, "chain": {"entry": {"exchange_id": "demoex", "seq": 1, "kind": "daily", "prev_entry_hash": "0000000000000000000000000000000000000000000000000000000000000000", "body_hash": "c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d5", "business_date": "2026-05-28", "payload_hash": "b21038a4e2868ca64375b653bb7075e54301a5869823d45149539a5e0dc38b65"}}, "reconciliation": {"scheme": "day-root/v1", "reconciliation_ok": true, "assets": [{"asset": "BTC", "scale": 8, "trust_required": "150000000", "trust_actual": "165000000", "residual": "15000000", "ok": true}, {"asset": "ETH", "scale": 18, "trust_required": "5000000000000000000", "trust_actual": "5500000000000000000", "residual": "500000000000000000", "ok": true}], "day_root": "c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d5"}};
 
 window.addEventListener("DOMContentLoaded",function(){
   $("verify").onclick=verify;

@@ -1,0 +1,83 @@
+{
+  "schema": "bitcert-proof-bundle/v2",
+  "bitcoin_network": "regtest",
+  "generated_at": "2026-05-29T09:00:00Z",
+  "record": {
+    "kind": "daily",
+    "leaf_bytes": "648b0571d9ca1715258adbdaf020111bb486ae164edb6472e8f22408b5f91e05",
+    "preimage": {
+      "scheme": "sha256-jcs-fields",
+      "domain": "attest:daily:leaf\n",
+      "fields": {
+        "asset": "BTC",
+        "balance_minor": "150000000",
+        "user_commitment": "fdd2290fb1bc5ab7c6932b17e478c38b1b4f39acee5ba391a7e691b118c055a4"
+      },
+      "commitment": {
+        "scheme": "sha256-salt-account",
+        "account_field": "account_id"
+      }
+    },
+    "descriptor": {
+      "exchange_id": "demoex",
+      "business_date": "2026-05-28"
+    }
+  },
+  "merkle": {
+    "leaf_index": 0,
+    "root": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085",
+    "siblings": [
+      "aa968f99cf907d0981efbc226c01f268aae3fa318d4da0b8f3a869409ac11f11",
+      "292216d8f9a369f521123ee787b0c13b825d984c09752c22e892a75d2caca214"
+    ],
+    "directions": [
+      "right",
+      "right"
+    ]
+  },
+  "anchor": {
+    "reveal_txid": "9c6d87bf24ad431e79a05cb372dd21003d3392ee246f4f101bc147b1e666b80f",
+    "commit_txid": "0000000000000000000000000000000000000000000000000000000000000000",
+    "reveal_tx_hex": "0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000fdffffff020000000000000000596a4c56424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d500000000000000000000000000000000000000000000000000000000000000002823000000000000225120111111111111111111111111111111111111111111111111111111111111111101400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "op_return_payload_hex": "424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d50000000000000000000000000000000000000000000000000000000000000000",
+    "confirmed": {
+      "block_height": 142,
+      "block_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "confirmations": 6
+    }
+  },
+  "chain": {
+    "entry": {
+      "exchange_id": "demoex",
+      "seq": 1,
+      "kind": "daily",
+      "prev_entry_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "body_hash": "c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d5",
+      "business_date": "2026-05-28",
+      "payload_hash": "b21038a4e2868ca64375b653bb7075e54301a5869823d45149539a5e0dc38b65"
+    }
+  },
+  "reconciliation": {
+    "scheme": "day-root/v1",
+    "reconciliation_ok": true,
+    "assets": [
+      {
+        "asset": "BTC",
+        "scale": 8,
+        "trust_required": "150000000",
+        "trust_actual": "165000000",
+        "residual": "999",
+        "ok": true
+      },
+      {
+        "asset": "ETH",
+        "scale": 18,
+        "trust_required": "5000000000000000000",
+        "trust_actual": "5500000000000000000",
+        "residual": "500000000000000000",
+        "ok": true
+      }
+    ],
+    "day_root": "c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d5"
+  }
+}

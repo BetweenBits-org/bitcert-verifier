@@ -28,19 +28,24 @@ This file is the **authoritative wire contract** shared by:
 
 ```jsonc
 {
-  "schema": "bitcert-proof-bundle/v1",   // REQUIRED, exact string
+  "schema": "bitcert-proof-bundle/v2",   // REQUIRED — "/v1" or "/v2"
   "bitcoin_network": "regtest",           // "mainnet" | "testnet" | "signet" | "regtest"
   "generated_at": "2026-05-29T09:00:00Z", // informational only (NOT trusted)
 
-  "record":  { ... },   // REQUIRED — what is being attested (§2)
-  "merkle":  { ... },   // REQUIRED — inclusion proof (§3)
-  "anchor":  { ... },   // REQUIRED — Bitcoin commitment (§4)
-  "chain":   { ... }    // OPTIONAL — per-exchange chaining (§5)
+  "record":         { ... },   // REQUIRED — what is being attested (§2)
+  "merkle":         { ... },   // REQUIRED — inclusion proof (§3)
+  "anchor":         { ... },   // REQUIRED — Bitcoin commitment (§4)
+  "chain":          { ... },   // OPTIONAL — per-exchange chaining (§5)
+  "reconciliation": { ... }    // OPTIONAL — (a)/(b)/(c) trust computation (§6; v2 daily only)
 }
 ```
 
-A verifier MUST reject any bundle whose `schema` is not exactly
-`bitcert-proof-bundle/v1`.
+A verifier MUST reject any bundle whose `schema` is not one of
+`bitcert-proof-bundle/v1` or `bitcert-proof-bundle/v2`. **v2** adds the
+`reconciliation` section (§6): the OP_RETURN then commits `day_root` (which binds
+the Merkle root AND the reconciliation) instead of the bare Merkle root. A
+verifier branches on the **presence of `reconciliation`**, not the version
+string alone.
 
 All byte fields are **lowercase hex**, no `0x` prefix, fixed length as noted.
 
@@ -216,8 +221,16 @@ Two encodings exist (selected at anchor time). The verifier MUST detect by the
 | 22..54 | 32  | **merkle_root** |
 | 54..86 | 32  | aux_commitment (zero for MVP) |
 
-**Commitment check:** the `merkle_root` extracted from the OP_RETURN payload MUST
-equal `merkle.root` recomputed in §3. (This proves the root was committed.)
+**Commitment check:** the 32-byte root extracted from the OP_RETURN payload (the
+`merkle_root` slot above) MUST equal:
+  * **v1** (no `reconciliation` section) — `merkle.root` recomputed in §3 (the
+    customer-balance liability root); or
+  * **v2** (`reconciliation` present) — the `day_root` recomputed in §6, which
+    itself binds `merkle.root` + the reconciliation commitment.
+
+The slot is the same 32 bytes either way; only what it must equal differs. (This
+proves the day's settlement — liabilities, and for v2 the trust reconciliation —
+was committed on-chain.)
 
 ### 4.2 Offline txid binding (trustless, no network)
 
@@ -341,9 +354,55 @@ is still pending (reorg/RBF safety, see plan §3).
 
 ---
 
-## 6. Versioning
+## 6. `reconciliation` — the trust computation the anchor commits (v2)
+
+Present on **v2 daily** bundles. Carries the per-asset MAS Reg-18H `(a)/(b)/(c)`
+computation, and is the preimage the verifier folds into `day_root`.
+
+```jsonc
+"reconciliation": {
+  "scheme": "day-root/v1",
+  "reconciliation_ok": true,            // AND over every asset's `ok`
+  "assets": [
+    { "asset": "BTC", "scale": 8,
+      "trust_required": "150000000",    // (b) aggregate customer liability, minor units (string)
+      "trust_actual":   "165000000",    // (a) reserve trust held, minor units (string)
+      "residual":       "15000000",     // (c) = (a) − (b), minor units (string)
+      "ok": true }                      // (c) ≥ 0
+  ],
+  "day_root": "c6eb…"                   // informational mirror; the verifier RECOMPUTES it
+}
+```
+
+**Derivation** (every hash uses the flat JCS of §2.1b — sorted keys, compact;
+`ok`/`reconciliation_ok` committed as the integer `1`/`0`, `scale` as an integer,
+decimals as the minor-unit strings):
+
+```
+asset_row        = JCS({asset, ok, residual, scale, trust_actual, trust_required})
+assets_hash      = SHA-256( "attest:daily:recon-assets\n" || Σ asset_row )   // assets SORTED by symbol
+recon_commitment = SHA-256( "attest:daily:recon\n"
+                            || JCS({assets_hash, business_date, exchange_id, reconciliation_ok}) )
+day_root         = SHA-256( "attest:daily:anchor\n"
+                            || JCS({balances_root, business_date, exchange_id, recon_commitment}) )
+```
+
+`business_date` and `exchange_id` come from `chain.entry`; `balances_root` is the
+hex of `merkle.root`. The verifier recomputes `day_root` and asserts it equals
+**both** the OP_RETURN 32-byte slot (§4.1) **and** `chain.entry.body_hash` (§5).
+Tampering with any `(a)/(b)/(c)` figure changes `recon_commitment` → `day_root`,
+which then no longer matches the OP_RETURN, so the bundle is rejected.
+
+> **Honesty.** `day_root` makes the reconciliation *tamper-evident*, not *true*:
+> the `(a)` reserve side is supplied by the exchange (in the demo it is
+> simulated), NOT independently measured. Coverage here is a system computation,
+> not a solvency proof or an audit opinion.
+
+## 7. Versioning
 
 `schema` is bumped (`/v2`, …) on any breaking change. Verifiers reject unknown
-majors. The producer and the verifiers in this repo share a fixture
-(`fixtures/*.json`) that is cross-checked in CI on both sides to prevent drift
-(plan §1.2나 requirement 5).
+majors but accept every supported major listed in §1. The producer and the
+verifiers in this repo share fixtures (`fixtures/*.json`) cross-checked in CI on
+both sides to prevent drift; the `day_root` derivation is additionally pinned as
+a known-answer vector shared with the Rust engine
+(`services/daily-settlement/src/domain/anchor.rs`).

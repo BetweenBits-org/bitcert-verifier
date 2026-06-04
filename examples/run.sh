@@ -22,5 +22,7 @@ echo "== 04 tampered-chain (link D / §5 must catch it) =="
 check "04 tampered chain"     1 $CLI 04-tampered-chain/bundle.json
 echo "== 05 daily-chain-walkback (§5 continuity via chain.links) =="
 check "05 chain walk-back"    0 $CLI 05-daily-chain-walkback/bundle.json --account alice@demoex --salt 5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e
+echo "== 06 daily day_root (v2: anchor commits the reconciliation) =="
+check "06 day_root v2"        0 $CLI 06-daily-day-root/bundle.json --account alice@demoex --salt 5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e
 
 echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"; exit 1; }

@@ -102,6 +102,39 @@ def prior_daily_entry(exchange_id, seq, business_date, body_hash, prev_entry_has
     e["payload_hash"] = V.payload_hash(e)
     return e
 
+def assemble_daily_v2_bundle(exchange_id, business_date, recon_assets, recon_ok):
+    """A v2 daily bundle: the OP_RETURN + chain body_hash carry `day_root`
+    (binds the customer-balance root AND the (a)/(b)/(c) reconciliation), and a
+    `reconciliation` section ships the §6 inputs the verifier folds back in."""
+    others = [bytes([b]) * 32 for b in (0xB1, 0xC2, 0xD3)]
+    balances_root, proof = merkle4([DAILY_LEAF] + others)
+    rc = V.recon_commitment(exchange_id, business_date, recon_ok, recon_assets)
+    dr = V.day_root(exchange_id, business_date, balances_root.hex(), rc)  # the anchored value
+    batch_id = bytes.fromhex("0192a3b4c5d6e7f80192a3b4c5d6e7f8")
+    payload = bc30(dr, batch_id)                      # OP_RETURN inscribes day_root, not the bare root
+    raw_tx = build_reveal_tx(payload)
+    txid, _ = V.txid_from_raw(raw_tx)
+    e = {"exchange_id": exchange_id, "seq": 1, "kind": "daily",
+         "prev_entry_hash": "00" * 32, "body_hash": dr.hex(),  # body_hash = day_root
+         "business_date": business_date}
+    e["payload_hash"] = V.payload_hash(e)
+    bundle = {
+        "schema": "bitcert-proof-bundle/v2",
+        "bitcoin_network": "regtest",
+        "generated_at": "2026-05-29T09:00:00Z",
+        "record": {"kind": "daily", "leaf_bytes": DAILY_LEAF.hex(),
+                   "preimage": daily_preimage(),
+                   "descriptor": {"exchange_id": exchange_id, "business_date": business_date}},
+        "merkle": proof,
+        "anchor": {"reveal_txid": txid, "commit_txid": "00" * 32,
+                   "reveal_tx_hex": raw_tx, "op_return_payload_hex": payload.hex(),
+                   "confirmed": {"block_height": 142, "block_hash": "00" * 32, "confirmations": 6}},
+        "chain": {"entry": e},
+        "reconciliation": {"scheme": "day-root/v1", "reconciliation_ok": recon_ok,
+                           "assets": recon_assets, "day_root": dr.hex()},
+    }
+    return bundle, balances_root, dr
+
 # ---------------- scenario data ----------------
 # 01 — file artifact
 ARTIFACT = b"BitCert MAS Reg 18H daily attestation report (demo artifact).\n"
@@ -113,6 +146,28 @@ SALT_HEX = "5e" * 32  # 32-byte per-customer secret (deterministic for the fixtu
 USER_COMMITMENT = V.derive_user_commitment(SALT_HEX, ACCOUNT)
 DAILY_FIELDS = {"asset": "BTC", "balance_minor": "150000000", "user_commitment": USER_COMMITMENT}
 DAILY_LEAF = V.sha256(DAILY_DOMAIN.encode() + V._jcs(DAILY_FIELDS))
+
+# ---- cross-language KAT: day_root MUST match the Rust engine's pinned vectors
+# (services/daily-settlement/src/domain/anchor.rs::tests::pinned_vectors). Same
+# inputs → same recon_commitment + day_root, proving byte-exact agreement across
+# Rust ⇄ Python ⇄ JS. A drift here is a wire-breaking change and aborts generation.
+_KAT_ASSETS = [
+    {"asset": "ETH", "scale": 18, "trust_required": "100", "trust_actual": "130", "residual": "30", "ok": True},
+    {"asset": "BTC", "scale": 8,  "trust_required": "150", "trust_actual": "180", "residual": "30", "ok": True},
+]
+_KAT_BALANCES_ROOT = "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085"
+_KAT_RC = V.recon_commitment("demo-sgx", "2026-06-04", True, _KAT_ASSETS)
+_KAT_DR = V.day_root("demo-sgx", "2026-06-04", _KAT_BALANCES_ROOT, _KAT_RC)
+assert _KAT_RC.hex() == "01b727a88b5e76d01b7f9aaf6b26ad290405cf7819cb97e1955fadcbb6b3b67b", \
+    "recon_commitment KAT drift vs Rust engine: " + _KAT_RC.hex()
+assert _KAT_DR.hex() == "bf28ccbde552f18a211bfd747adc643784e95e37dd8e43d75c5fbd7ba6009916", \
+    "day_root KAT drift vs Rust engine: " + _KAT_DR.hex()
+
+# Per-asset (a)/(b)/(c) for the v2 daily example (realistic minor units).
+V2_ASSETS = [
+    {"asset": "BTC", "scale": 8,  "trust_required": "150000000", "trust_actual": "165000000", "residual": "15000000", "ok": True},
+    {"asset": "ETH", "scale": 18, "trust_required": "5000000000000000000", "trust_actual": "5500000000000000000", "residual": "500000000000000000", "ok": True},
+]
 
 def daily_preimage():
     return {"scheme": "sha256-jcs-fields", "domain": DAILY_DOMAIN, "fields": DAILY_FIELDS,
@@ -234,6 +289,29 @@ def main():
       "prior entry + head: hash-linkage holds`. Flip any byte of the linked "
       "entry and step 4 FAILS.\n" % (ACCOUNT, SALT_HEX))
 
+    # ---- examples/06 — daily day_root (v2: the anchor commits the reconciliation) ----
+    b06, _root06, _dr06 = assemble_daily_v2_bundle("demoex", "2026-05-28", V2_ASSETS, True)
+    w(os.path.join(EX, "06-daily-day-root", "bundle.json"), jdump(b06))
+    w(os.path.join(EX, "06-daily-day-root", "customer-secret.txt"),
+      "# Held PRIVATELY by the customer (NOT in the public bundle).\n"
+      "account_id=%s\nsalt_hex=%s\n" % (ACCOUNT, SALT_HEX))
+    w(os.path.join(EX, "06-daily-day-root", "expected.txt"), "VERIFIED (exit 0)\n")
+    w(os.path.join(EX, "06-daily-day-root", "README.md"),
+      "# 06 · Daily day_root (v2 — the anchor commits the trust reconciliation)\n\n"
+      "A **v2** daily bundle. The OP_RETURN no longer carries the bare customer-balance "
+      "Merkle root — it carries `day_root`:\n\n```\n"
+      "recon_commitment = SHA256(\"attest:daily:recon\\n\"  || JCS{assets_hash, business_date, exchange_id, reconciliation_ok})\n"
+      "day_root         = SHA256(\"attest:daily:anchor\\n\" || JCS{balances_root, business_date, exchange_id, recon_commitment})\n```\n\n"
+      "So one Bitcoin anchor attests BOTH the customer liabilities (the Merkle root) "
+      "AND the (a)/(b)/(c) trust reconciliation. The verifier recomputes `day_root` from "
+      "the `reconciliation` section + the Merkle root and asserts it equals the OP_RETURN "
+      "(§4) and the chain `body_hash` (§5).\n\n```bash\n"
+      "python3 ../../verify-cli/verify.py bundle.json --account %s --salt %s\n```\n\n"
+      "Expected: every check ✓ → **VERIFIED**, with step 6 listing the per-asset "
+      "(a)/(b)/(c). NOTE: the (a) reserve side is exchange-supplied, not independently "
+      "measured. Flip any residual and step 2 (OP_RETURN ≠ recomputed day_root) FAILS.\n"
+      % (ACCOUNT, SALT_HEX))
+
     # ---- examples/run.sh ----
     run = """#!/usr/bin/env bash
 # Runs every example through the offline verifier and asserts the expected result.
@@ -259,9 +337,11 @@ echo "== 04 tampered-chain (link D / §5 must catch it) =="
 check "04 tampered chain"     1 $CLI 04-tampered-chain/bundle.json
 echo "== 05 daily-chain-walkback (§5 continuity via chain.links) =="
 check "05 chain walk-back"    0 $CLI 05-daily-chain-walkback/bundle.json --account alice@demoex --salt %s
+echo "== 06 daily day_root (v2: anchor commits the reconciliation) =="
+check "06 day_root v2"        0 $CLI 06-daily-day-root/bundle.json --account alice@demoex --salt %s
 
 echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"; exit 1; }
-""" % (SALT_HEX, SALT_HEX)
+""" % (SALT_HEX, SALT_HEX, SALT_HEX)
     run_path = os.path.join(EX, "run.sh")
     w(run_path, run)
     os.chmod(run_path, 0o755)
@@ -273,6 +353,11 @@ echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"
     # forged §5 chain entry: links A/B/C pass, chain payload_hash does not recompute
     tampered_chain = json.loads(jdump(b02)); tampered_chain["chain"]["entry"]["payload_hash"] = "ff" * 32
     w(os.path.join(HERE, "sample-bundle.tampered-chain.json"), jdump(tampered_chain))
+    # v2 day_root fixtures (CI cross-check).
+    w(os.path.join(HERE, "sample-bundle.daily-v2.valid.json"), jdump(b06))     # OP_RETURN == day_root
+    # tampered reconciliation: bump a residual → recomputed day_root ≠ OP_RETURN → §4.1 FAILS.
+    tampered_recon = json.loads(jdump(b06)); tampered_recon["reconciliation"]["assets"][0]["residual"] = "999"
+    w(os.path.join(HERE, "sample-bundle.tampered-recon.json"), jdump(tampered_recon))
 
     # ---- inline the daily sample into index.html ----
     html_path = os.path.join(ROOT, "index.html")
@@ -282,12 +367,14 @@ echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"
     # NOTE: pass a function as the replacement — a plain string would have its
     # backslash escapes (e.g. the \n inside "attest:daily:leaf\n") interpreted by
     # re.sub, turning them into real newlines and breaking the JS string literal.
-    inline = "const SAMPLE=" + json.dumps(b02) + ";"
+    # Inline the v2 day_root sample so the single-file HTML showcases the new path.
+    inline = "const SAMPLE=" + json.dumps(b06) + ";"
     html = re.sub(r"const SAMPLE=.*?;", lambda _m: inline, html, count=1, flags=re.S)
     with open(html_path, "w") as f:
         f.write(html)
 
     print("generated fixtures + examples/. daily leaf:", DAILY_LEAF.hex())
+    print("  KAT day_root:", _KAT_DR.hex(), "| v2 day_root(06):", _dr06.hex())
     print("  file-artifact leaf:", ART_LEAF.hex(), "| reveal_txid(02):", b02["anchor"]["reveal_txid"])
 
 if __name__ == "__main__":

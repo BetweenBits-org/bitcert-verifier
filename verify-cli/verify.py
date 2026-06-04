@@ -29,6 +29,11 @@ import json
 import sys
 
 SCHEMA = "bitcert-proof-bundle/v1"
+# v2 adds the daily `reconciliation` section: the OP_RETURN commits `day_root`
+# (binds the balance root + the (a)/(b)/(c) reconciliation) instead of the bare
+# Merkle root. The verifier accepts both and branches on the `reconciliation`
+# section's presence (NOT the version string alone).
+SCHEMAS = ("bitcert-proof-bundle/v1", "bitcert-proof-bundle/v2")
 CHAIN_DOMAIN = b"bitcert:chain:v1\n"
 
 # ----- ANSI (auto-disabled when not a tty) -----
@@ -326,8 +331,54 @@ def _verify_chain_links(links, head):
 
 # ----- §2.1 preimage (link A): original record -> leaf_bytes -----
 def _jcs(obj):
-    # RFC-8785 subset: sorted keys, compact. All values are strings in our schemes.
+    # RFC-8785 subset: sorted keys, compact. All values are strings/ints in our schemes.
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+# ----- §6 reconciliation commitment + day_root (v2) -----
+# Byte-identical to services/daily-settlement/src/domain/anchor.rs. Reuses the
+# flat _jcs (Str/Int values, sorted keys) so all three implementations agree:
+#   asset row  = JCS{asset, ok(1|0), residual, scale(int), trust_actual, trust_required}
+#   assets_hash      = SHA256("attest:daily:recon-assets\n" || Σ asset_row)   # SORTED by symbol
+#   recon_commitment = SHA256("attest:daily:recon\n"  || JCS{assets_hash, business_date, exchange_id, reconciliation_ok(1|0)})
+#   day_root         = SHA256("attest:daily:anchor\n" || JCS{balances_root, business_date, exchange_id, recon_commitment})
+RECON_ASSETS_DOMAIN = b"attest:daily:recon-assets\n"
+RECON_DOMAIN        = b"attest:daily:recon\n"
+DAY_ROOT_DOMAIN     = b"attest:daily:anchor\n"
+
+def _asset_row_jcs(a):
+    return _jcs({
+        "asset": a["asset"],
+        "ok": 1 if a["ok"] else 0,
+        "residual": a["residual"],
+        "scale": int(a["scale"]),
+        "trust_actual": a["trust_actual"],
+        "trust_required": a["trust_required"],
+    })
+
+def assets_hash(assets):
+    h = hashlib.sha256()
+    h.update(RECON_ASSETS_DOMAIN)
+    for a in sorted(assets, key=lambda x: x["asset"]):
+        h.update(_asset_row_jcs(a))
+    return h.digest()
+
+def recon_commitment(exchange_id, business_date, reconciliation_ok, assets):
+    body = _jcs({
+        "assets_hash": assets_hash(assets).hex(),
+        "business_date": business_date,
+        "exchange_id": exchange_id,
+        "reconciliation_ok": 1 if reconciliation_ok else 0,
+    })
+    return sha256(RECON_DOMAIN + body)
+
+def day_root(exchange_id, business_date, balances_root_hex, recon_commit):
+    body = _jcs({
+        "balances_root": balances_root_hex,
+        "business_date": business_date,
+        "exchange_id": exchange_id,
+        "recon_commitment": recon_commit.hex(),
+    })
+    return sha256(DAY_ROOT_DOMAIN + body)
 
 def derive_user_commitment(salt_hex, account_id):
     return sha256(bytes.fromhex(salt_hex) + account_id.encode("utf-8")).hex()
@@ -378,8 +429,8 @@ def _line(state, title, detail=""):
             print("      " + DIM + d + RST)
 
 def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, salt_hex=None):
-    if bundle.get("schema") != SCHEMA:
-        _line("bad", "Unsupported schema", "expected %s, got %r" % (SCHEMA, bundle.get("schema")))
+    if bundle.get("schema") not in SCHEMAS:
+        _line("bad", "Unsupported schema", "expected one of %s, got %r" % (", ".join(SCHEMAS), bundle.get("schema")))
         return False
     _line("ok", "Schema %s · network: %s" % (bundle["schema"], bundle.get("bitcoin_network", "?")))
 
@@ -426,15 +477,33 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
     except Exception as e:
         all_ok = False; _line("bad", "1 · Merkle inclusion — error", str(e))
 
-    # §4.1 OP_RETURN
+    # §4.1 OP_RETURN — v2 commits the day_root (binds the balance root AND the
+    # (a)/(b)/(c) reconciliation); v1 commits the bare merkle_root. The 32-byte
+    # OP_RETURN slot is `decoded["merkle_root"]` in both (the field name is
+    # historical). Branch on the presence of the reconciliation section.
     decoded = None
+    expected_day_root = None  # set in the v2 path; reused by §5 body_hash check
+    recon_sec = bundle.get("reconciliation")
     try:
         decoded = decode_op_return(bundle["anchor"]["op_return_payload_hex"])
-        ok = merkle_root is not None and decoded["merkle_root"].lower() == merkle_root.lower()
-        _line("ok" if ok else "bad",
-              "2 · OP_RETURN commitment — root is %s on-chain (%s)" %
-              ("committed" if ok else "NOT committed", decoded["format"]),
-              "OP_RETURN merkle_root: %s" % decoded["merkle_root"])
+        anchored = decoded["merkle_root"]
+        if recon_sec:
+            ce = (bundle.get("chain") or {}).get("entry") or {}
+            rc = recon_commitment(ce.get("exchange_id"), ce.get("business_date"),
+                                  recon_sec.get("reconciliation_ok"), recon_sec.get("assets", []))
+            expected_day_root = day_root(ce.get("exchange_id"), ce.get("business_date"),
+                                         merkle_root, rc).hex()
+            ok = merkle_root is not None and expected_day_root.lower() == anchored.lower()
+            _line("ok" if ok else "bad",
+                  "2 · OP_RETURN commitment — day_root is %s on-chain (%s)" %
+                  ("committed" if ok else "NOT committed", decoded["format"]),
+                  "OP_RETURN day_root:  %s\nrecomputed day_root: %s" % (anchored, expected_day_root))
+        else:
+            ok = merkle_root is not None and anchored.lower() == merkle_root.lower()
+            _line("ok" if ok else "bad",
+                  "2 · OP_RETURN commitment — root is %s on-chain (%s)" %
+                  ("committed" if ok else "NOT committed", decoded["format"]),
+                  "OP_RETURN merkle_root: %s" % anchored)
         all_ok &= ok
     except Exception as e:
         all_ok = False; _line("bad", "2 · OP_RETURN commitment — error", str(e))
@@ -473,20 +542,26 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
             e = ch["entry"]
             ph = payload_hash(e)
             ph_ok = ph.lower() == e["payload_hash"].lower()
-            # body_hash carries the day's Merkle root for daily; report (= merkle root) for monthly.
-            body_ok = e.get("kind") != "daily" or (merkle_root is not None and
-                      e.get("body_hash", "").lower() == merkle_root.lower())
+            # body_hash for a daily link carries the anchored root: the day_root
+            # for v2 (binds reconciliation), or the bare Merkle root for v1.
+            if e.get("kind") != "daily":
+                body_ok = True
+            elif expected_day_root is not None:
+                body_ok = e.get("body_hash", "").lower() == expected_day_root.lower()
+            else:
+                body_ok = merkle_root is not None and e.get("body_hash", "").lower() == merkle_root.lower()
+            committed_label = "day_root" if expected_day_root is not None else "merkle root"
             # optional walk-back: each adjacent pair must hash-link (§5 continuity).
             links = ch.get("links") or []
             link_ok, link_detail = _verify_chain_links(links, e)
             ok = ph_ok and body_ok and link_ok
             extra = ""
             if not body_ok:
-                extra += " · body_hash ≠ merkle root"
+                extra += " · body_hash ≠ %s" % committed_label
             if not link_ok:
                 extra += " · prev-entry link broken"
-            detail = ("seq %s (%s)\nrecomputed payload_hash: %s\nbody_hash %s merkle root" %
-                      (e.get("seq"), e.get("kind"), ph, "=" if body_ok else "≠"))
+            detail = ("seq %s (%s)\nrecomputed payload_hash: %s\nbody_hash %s %s" %
+                      (e.get("seq"), e.get("kind"), ph, "=" if body_ok else "≠", committed_label))
             if link_detail:
                 detail += "\n" + link_detail
             _line("ok" if ok else "bad",
@@ -496,6 +571,25 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
             all_ok &= ok
         except Exception as e:
             all_ok = False; _line("bad", "4 · Chain entry — error", str(e))
+
+    # §6 reconciliation (v2, informational) — the (a)/(b)/(c) trust computation
+    # the day_root commits to. The commitment is already gated by §2/§4.1 (day_root
+    # == OP_RETURN) + §5 (body_hash == day_root); this just renders the figures.
+    # NOTE: the (a) reserve side is exchange-supplied, NOT independently measured.
+    if recon_sec:
+        try:
+            rows = recon_sec.get("assets", [])
+            table = "\n".join(
+                "  %-6s (a) held=%s  (b) liab=%s  (c) resid=%s  %s" % (
+                    r.get("asset"), r.get("trust_actual"), r.get("trust_required"),
+                    r.get("residual"), "✓ covered" if r.get("ok") else "✗ shortfall")
+                for r in rows)
+            _line("ok" if recon_sec.get("reconciliation_ok") else "warn",
+                  "6 · Trust reconciliation (a−b=c) — %d asset(s), %s" % (
+                      len(rows), "all covered" if recon_sec.get("reconciliation_ok") else "shortfall present"),
+                  table + "\n  (a) reserve side is exchange-supplied, not independently measured.")
+        except Exception as e:
+            _line("warn", "6 · Trust reconciliation — display error", str(e))
 
     # on-chain (optional)
     if explorer and txid:
