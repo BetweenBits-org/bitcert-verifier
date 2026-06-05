@@ -215,8 +215,19 @@ def parse_envelope(script):
 def verify_witness_bundle(bundle, explorer=None):
     """Verify a witness-INSCRIBED record: the original bytes are recovered from
     the reveal tx WITNESS (no off-bundle file needed) and bound to
-    record.leaf_bytes — which equals the txid-committed OP_RETURN root. A
-    tampered witness body fails the bind; a swapped tx fails the txid check."""
+    record.leaf_bytes — which IS txid-committed. Dual-mode (UNIFIED-WITNESS-CONTRACT):
+
+      • LEGACY  — OP_RETURN is a raw 32 B = leaf_bytes (no BC magic). The
+        inscribed document IS the directly-committed leaf (step 2: OP_RETURN ==
+        leaf_bytes; step 3: sha256(body) == leaf_bytes).
+      • UNIFIED — OP_RETURN is BC01/BC30(merkle_root). The leaf is bound to the
+        on-chain root THROUGH the Merkle proof (step 2: verify_merkle(record) ==
+        decoded.merkle_root; step 3: sha256(body) == leaf_bytes, unchanged).
+
+    Mode is decided by decoding the OP_RETURN: a recognised BC magic → UNIFIED,
+    a raw 32-byte payload with no magic → LEGACY. A tampered witness body fails
+    the bind; a swapped tx fails the txid check; a forged Merkle proof fails the
+    unified root check."""
     anchor, record = bundle["anchor"], bundle["record"]
     wit = anchor["witness_envelope"]
     leaf = record["leaf_bytes"].lower()
@@ -239,13 +250,35 @@ def verify_witness_bundle(bundle, explorer=None):
     except Exception as e:
         _line("bad", "1 · Transaction binding — error", str(e)); return False
 
-    # The inscribed document IS the directly-committed leaf: OP_RETURN == leaf_bytes.
-    root_ok = (opret or "").lower() == leaf
-    _line("ok" if root_ok else "bad",
-          "2 · On-chain commitment — OP_RETURN root %s record.leaf_bytes" %
-          ("== " if root_ok else "≠ "),
-          "on-chain root: %s" % (opret or ""))
-    all_ok &= root_ok
+    # Mode detection: a BC01/BC30 magic in the OP_RETURN → UNIFIED (merkle-bind);
+    # a raw 32-byte payload with no magic → LEGACY (OP_RETURN == leaf_bytes).
+    decoded = None
+    try:
+        decoded = decode_op_return(anchor["op_return_payload_hex"])
+    except Exception:
+        decoded = None
+
+    if decoded is None:
+        # LEGACY — the inscribed document IS the directly-committed leaf.
+        root_ok = (opret or "").lower() == leaf
+        _line("ok" if root_ok else "bad",
+              "2 · On-chain commitment — OP_RETURN root %s record.leaf_bytes" %
+              ("== " if root_ok else "≠ "),
+              "on-chain root: %s" % (opret or ""))
+        all_ok &= root_ok
+    else:
+        # UNIFIED — bind leaf_bytes to the on-chain merkle_root via the proof.
+        try:
+            anchored = decoded["merkle_root"]
+            computed_root, merkle_ok = verify_merkle(record, bundle["merkle"])
+            root_ok = merkle_ok and computed_root.lower() == anchored.lower()
+            _line("ok" if root_ok else "bad",
+                  "2 · On-chain commitment — record %s the OP_RETURN merkle_root (%s)" %
+                  ("binds to" if root_ok else "does NOT bind to", decoded["format"]),
+                  "recomputed root:    %s\nOP_RETURN merkle_root: %s" % (computed_root, anchored))
+            all_ok &= root_ok
+        except Exception as e:
+            _line("bad", "2 · On-chain commitment — error", str(e)); return False
 
     # THE headline: recover the original from the witness, bind to leaf_bytes.
     try:
