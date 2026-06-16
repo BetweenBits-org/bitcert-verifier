@@ -42,7 +42,7 @@ This file is the **authoritative wire contract** shared by:
 
 A verifier MUST reject any bundle whose `schema` is not one of
 `bitcert-proof-bundle/v1` or `bitcert-proof-bundle/v2`. **v2** adds the
-`reconciliation` section (§6): the OP_RETURN then commits `day_root` (which binds
+`reconciliation` section (§6): the anchor output then commits `day_root` (which binds
 the Merkle root AND the reconciliation) instead of the bare Merkle root. A
 verifier branches on the **presence of `reconciliation`**, not the version
 string alone.
@@ -187,7 +187,7 @@ assert cur == merkle.root      // else: record not in this root → REJECT
   "reveal_txid": "….(64 hex, big-endian/display order)", // REQUIRED
   "commit_txid": "….(64 hex)",                            // OPTIONAL, informational
   "reveal_tx_hex": "0200…",   // REQUIRED for offline binding — full raw reveal tx
-  "op_return_payload_hex": "4243333001…", // REQUIRED — OP_RETURN data (no 0x6a/push)
+  "op_return_payload_hex": "4243333001…", // REQUIRED — anchor output data (no 0x6a/push)
   "confirmed": {              // OPTIONAL — a *claim*; the verifier re-checks on-chain
     "block_height": 142,
     "block_hash": "….(64 hex)",
@@ -196,7 +196,7 @@ assert cur == merkle.root      // else: record not in this root → REJECT
 }
 ```
 
-### 4.1 OP_RETURN payload layout
+### 4.1 anchor output payload layout
 
 Two encodings exist (selected at anchor time). The verifier MUST detect by the
 4-byte ASCII magic and extract `merkle_root`.
@@ -221,7 +221,7 @@ Two encodings exist (selected at anchor time). The verifier MUST detect by the
 | 22..54 | 32  | **merkle_root** |
 | 54..86 | 32  | aux_commitment (zero for MVP) |
 
-**Commitment check:** the 32-byte root extracted from the OP_RETURN payload (the
+**Commitment check:** the 32-byte root extracted from the anchor output payload (the
 `merkle_root` slot above) MUST equal:
   * **v1** (no `reconciliation` section) — `merkle.root` recomputed in §3 (the
     customer-balance liability root); or
@@ -232,23 +232,23 @@ The slot is the same 32 bytes either way; only what it must equal differs. (This
 proves the day's settlement — liabilities, and for v2 the trust reconciliation —
 was committed on-chain.)
 
-> A `BC30` OP_RETURN also appears in the **unified witness** mode (§4.4.2): one
+> A `BC30` anchor output also appears in the **unified witness** mode (§4.4.2): one
 > reveal that carries both the inscribed document (witness) and `BC30(merkle_root)`.
 > There the `merkle_root` slot binds the witness-recovered `leaf_bytes` through the
-> Merkle proof — see §4.4.2 for that path. The raw-32-byte (no-magic) OP_RETURN is
+> Merkle proof — see §4.4.2 for that path. The raw-32-byte (no-magic) anchor output is
 > reserved for **legacy** witness reveals (§4.4.1), where the slot *is* `leaf_bytes`.
 
 ### 4.2 Offline txid binding (trustless, no network)
 
 `reveal_tx_hex` is the complete raw reveal transaction. The verifier:
 
-1. Locates the `OP_RETURN` output (scriptPubKey begins with `0x6a`), reads its
+1. Locates the `anchor output` output (scriptPubKey begins with `0x6a`), reads its
    pushed data, and confirms it equals `op_return_payload_hex`.
 2. Computes the transaction id as Bitcoin does — **double-SHA-256 of the
    *non-witness* (legacy) serialization**, then reverses the bytes to display
    order — and confirms it equals `reveal_txid`.
 
-This cryptographically binds the OP_RETURN bytes (hence the Merkle root) to the
+This cryptographically binds the anchor output bytes (hence the Merkle root) to the
 exact `reveal_txid`, with **zero network access**. A bundle that omits
 `reveal_tx_hex` can still be checked, but only at "trust the stated txid" strength.
 
@@ -272,7 +272,7 @@ rides in the reveal transaction's **witness** (a BIP-342 tapscript envelope). Th
 bundle stays self-contained: anyone can recover the original from the chain alone.
 
 The presence of `witness_envelope` selects the **witness-verification path**. That
-path has **two modes**, distinguished by the OP_RETURN payload:
+path has **two modes**, distinguished by the anchor output payload:
 
 | | **legacy** witness reveal | **unified** witness reveal |
 |---|---|---|
@@ -280,11 +280,11 @@ path has **two modes**, distinguished by the OP_RETURN payload:
 | `merkle` section | **absent** | **REQUIRED** (§3) |
 | reveal txs on-chain | two (separate anchor + witness) | **one** (anchor **and** witness in the same tx) |
 | `anchor.reveal_txid` | the witness reveal txid | the **unified** reveal = the standard-anchor txid (one tx) |
-| binding to `leaf_bytes` | direct: `OP_RETURN == leaf_bytes` | via Merkle: `leaf → merkle.root → OP_RETURN(merkle_root) → txid` |
+| binding to `leaf_bytes` | direct: `anchor output == leaf_bytes` | via Merkle: `leaf → merkle.root → anchor output(merkle_root) → txid` |
 | verifier branch selector | `decode_op_return` finds no BC magic (raw 32 B) | `decode_op_return` finds a `BC01`/`BC30` magic |
 
 A verifier MUST support **both** modes. It selects the mode by decoding the
-OP_RETURN (`decode_op_return`): a recognised `BC01`/`BC30` magic ⇒ **unified**;
+anchor output (`decode_op_return`): a recognised `BC01`/`BC30` magic ⇒ **unified**;
 a raw 32-byte payload with no magic ⇒ **legacy**.
 
 **On-chain envelope layout** (identical in both modes — in `witness[input_index][1]`,
@@ -300,9 +300,9 @@ the `OP_IF … OP_ENDIF` block. (The script-path sig signs with the **untweaked*
 internal key — BIP-342; this is a property of how the tx is built, not something the
 verifier re-checks.)
 
-#### 4.4.1 LEGACY mode — `OP_RETURN == leaf_bytes`, no `merkle` section
+#### 4.4.1 LEGACY mode — `anchor output == leaf_bytes`, no `merkle` section
 
-The reveal's OP_RETURN is the raw 32-byte document digest; the inscribed document
+The reveal's anchor output is the raw 32-byte document digest; the inscribed document
 **is** the committed leaf, so the binding is direct (no Merkle hop). There is no
 `merkle` section for a legacy-mode witness bundle.
 
@@ -323,19 +323,19 @@ The reveal's OP_RETURN is the raw 32-byte document digest; the inscribed documen
 
 ```
 1. txid(reveal_tx_hex) == anchor.reveal_txid                      (§4.2 — txid binding)
-2. OP_RETURN(reveal_tx_hex) == op_return_payload_hex == leaf_bytes (the doc IS the committed leaf)
+2. anchor output(reveal_tx_hex) == op_return_payload_hex == leaf_bytes (the doc IS the committed leaf)
 3. body = concat(envelope pushes after content_type)
    ASSERT  sha256(body) == record.leaf_bytes        ← bind to leaf_bytes, FAIL on mismatch
 4. (optional §4.3) confirm reveal_txid on a Bitcoin source of your choosing
 ```
 
-#### 4.4.2 UNIFIED mode — `OP_RETURN == BC30(merkle_root)`, `merkle` REQUIRED
+#### 4.4.2 UNIFIED mode — `anchor output == BC30(merkle_root)`, `merkle` REQUIRED
 
 The **unified** reveal collapses the standard Merkle anchor and the witness
 inscription into **one** transaction: a single script-path spend whose witness
-carries the document **and** whose OP_RETURN carries `BC30(merkle_root)` (§4.1).
+carries the document **and** whose anchor output carries `BC30(merkle_root)` (§4.1).
 There is only one reveal tx, so `anchor.reveal_txid` is simultaneously the
-standard-anchor txid and the witness-carrier txid. Because the OP_RETURN now
+standard-anchor txid and the witness-carrier txid. Because the anchor output now
 commits `merkle_root` (not `leaf_bytes`), the `merkle` section (§3) is **REQUIRED**:
 it is the link from `leaf_bytes` to the on-chain root.
 
@@ -350,7 +350,7 @@ it is the link from `leaf_bytes` to the on-chain root.
   …,
   "reveal_txid": "…(64 hex)",                     // the ONE unified reveal = the standard-anchor txid
   "op_return_payload_hex": "424333301e01…(172 hex = 86B)",  // BC30(merkle_root), NOT leaf_bytes (§4.1)
-  "reveal_tx_hex": "0200…",                        // REQUIRED — same tx carries witness AND BC30 OP_RETURN
+  "reveal_tx_hex": "0200…",                        // REQUIRED — same tx carries witness AND BC30 anchor output
   "witness_envelope": {                            // presence selects the witness-verification path
     "input_index": 0,
     "content_type": "application/pdf",             // GENERIC / opaque — informational only
@@ -363,7 +363,7 @@ it is the link from `leaf_bytes` to the on-chain root.
 
 ```
 1. txid(reveal_tx_hex) == anchor.reveal_txid                       (§4.2 — txid binding)
-   AND OP_RETURN(reveal_tx_hex) == op_return_payload_hex           (raw-tx self-consistency)
+   AND anchor output(reveal_tx_hex) == op_return_payload_hex           (raw-tx self-consistency)
 2. decoded = decode_op_return(op_return_payload_hex)               (BC30 → merkle_root slot, §4.1)
 3. (computed_root, ok) = verify_merkle(record, merkle)            (§3 — H_leaf fold)
    ASSERT ok                                                       (record.leaf_bytes IS in this root)
@@ -382,22 +382,22 @@ For a single attestation the Merkle tree has exactly one leaf, so
 PDF bytes ─(recover from witness)→ body
 sha256(body) == record.leaf_bytes               (step 4 — witness → leaf)
 H_leaf(record.leaf_bytes) == merkle.root        (step 3 — leaf → root)
-merkle.root == decoded.merkle_root (OP_RETURN)  (step 3 — root → on-chain)
-OP_RETURN ⊂ txid-committed (non-witness) bytes  (step 1 — on-chain → Bitcoin)
+merkle.root == decoded.merkle_root (anchor output)  (step 3 — root → on-chain)
+anchor output ⊂ txid-committed (non-witness) bytes  (step 1 — on-chain → Bitcoin)
 ```
 
 > The authoritative byte-and-bundle spec for unified mode is
 > `docs/UNIFIED-WITNESS-CONTRACT.md`; this is the v2.1-minor delta folded into the
 > wire contract. Schema-wise a unified witness bundle is a
 > `bitcert-proof-bundle/v2` bundle (the `merkle` section is required and the
-> OP_RETURN is a BC30 envelope, as in any v1/v2 standard anchor); it does **not**
+> anchor output is a BC30 envelope, as in any v1/v2 standard anchor); it does **not**
 > carry a `reconciliation` section.
 
 > **Why bind to `record.leaf_bytes` and NOT a self-declared value:** the witness is
 > **not committed in the txid** (it is malleable). `record.leaf_bytes` IS committed —
-> in legacy mode it equals the OP_RETURN payload directly; in unified mode it is
+> in legacy mode it equals the anchor output payload directly; in unified mode it is
 > reached *through the Merkle proof* (`merkle_root = H_leaf(leaf_bytes)`), and the
-> root is the OP_RETURN payload. Either way every link is txid-bound and confirmed
+> root is the anchor output payload. Either way every link is txid-bound and confirmed
 > on-chain, so a tampered witness body fails the body-bind step while leaving the
 > txid intact. A verifier that instead trusted `witness_envelope` for the expected
 > hash would be checking the data against itself (circular). `content_type` /
@@ -487,9 +487,9 @@ day_root         = SHA-256( "attest:daily:anchor\n"
 
 `business_date` and `exchange_id` come from `chain.entry`; `balances_root` is the
 hex of `merkle.root`. The verifier recomputes `day_root` and asserts it equals
-**both** the OP_RETURN 32-byte slot (§4.1) **and** `chain.entry.body_hash` (§5).
+**both** the anchor output 32-byte slot (§4.1) **and** `chain.entry.body_hash` (§5).
 Tampering with any `(a)/(b)/(c)` figure changes `recon_commitment` → `day_root`,
-which then no longer matches the OP_RETURN, so the bundle is rejected.
+which then no longer matches the anchor output, so the bundle is rejected.
 
 > **Honesty.** `day_root` makes the reconciliation *tamper-evident*, not *true*:
 > the `(a)` reserve side is supplied by the exchange (in the demo it is
@@ -506,9 +506,9 @@ a known-answer vector shared with the Rust engine
 (`services/daily-settlement/src/domain/anchor.rs`).
 
 The **unified witness** mode (§4.4.2) is a **minor** (v2.1, non-breaking)
-addition: it reuses the existing v2 shape (BC30 OP_RETURN + required `merkle`
+addition: it reuses the existing v2 shape (BC30 anchor output + required `merkle`
 section) and adds no new top-level field, so it needs no `schema` major bump.
 Verifiers MUST support **both** witness modes (legacy §4.4.1 and unified §4.4.2),
-selecting per-bundle by decoding the OP_RETURN as described in §4.4. Its
+selecting per-bundle by decoding the anchor output as described in §4.4. Its
 known-answer vector is pinned in `docs/UNIFIED-WITNESS-CONTRACT.md` §6 and
 emitted as a unified fixture (`fixtures/07-unified-witness-inscription.json`).

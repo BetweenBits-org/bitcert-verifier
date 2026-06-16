@@ -140,8 +140,8 @@
 
   <footer>
     <b>What this proves.</b> (1) the record's leaf is included in the Merkle root;
-    (2) that root is the value committed inside the transaction's OP_RETURN;
-    (3) those OP_RETURN bytes belong to exactly that <span class="kv">reveal_txid</span>
+    (2) that root is the value committed inside the transaction's anchor output;
+    (3) those anchor output bytes belong to exactly that <span class="kv">anchor txid</span>
     (double-SHA-256 of the raw transaction, computed here). Step 4 then shows that
     txid sits in a Bitcoin block.<br>
     Source &amp; spec: <a href="https://github.com/BetweenBits-org/bitcert-verifier">github.com/BetweenBits-org/bitcert-verifier</a>
@@ -189,8 +189,8 @@ async function verifyMerkle(rec, m){
   return { computedRoot:bytesToHex(cur), ok:eqHex(bytesToHex(cur),m.root) };
 }
 
-/* ---------- §4.1 OP_RETURN decode ---------- */
-function decodeOpReturn(payloadHex){
+/* ---------- §4.1 anchor output decode ---------- */
+function decodeAnchorPayload(payloadHex){
   const b=hexToBytes(payloadHex);
   const magic=String.fromCharCode(b[0],b[1],b[2],b[3]);
   if(magic==="BC01"){
@@ -203,7 +203,7 @@ function decodeOpReturn(payloadHex){
     return { format:"BC30", version:b[4], flags:b[5], batch_id:bytesToHex(b.slice(6,22)),
              merkle_root:bytesToHex(b.slice(22,54)), aux:bytesToHex(b.slice(54,86)) };
   }
-  throw new Error("unknown OP_RETURN magic (expected BC01/BC30)");
+  throw new Error("unknown anchor output magic (expected BC01/BC30)");
 }
 
 /* ---------- §4.2 raw tx parse + legacy txid ---------- */
@@ -249,8 +249,8 @@ function parseTx(hexStr){
   parts.push(r.take(4));                     // locktime
   return { legacy:concat.apply(null,parts), outputs };
 }
-function extractOpReturn(script){
-  if(script.length<1||script[0]!==0x6a) return null; // OP_RETURN
+function extractAnchorOutput(script){
+  if(script.length<1||script[0]!==0x6a) return null; // anchor output
   let o=1; if(o>=script.length) return new Uint8Array(0);
   const op=script[o++]; let len;
   if(op<=0x4b) len=op;
@@ -264,15 +264,15 @@ async function txidFromRaw(hexStr){
   const { legacy, outputs }=parseTx(hexStr);
   const h=await sha256d(legacy);            // double-SHA-256 of legacy serialization
   const txid=bytesToHex(h.reverse());       // display (big-endian) order
-  let opret=null;
-  for(const o of outputs){ const p=extractOpReturn(o.script); if(p){ opret=bytesToHex(p); break; } }
-  return { txid, opReturnHex:opret };
+  let anchorPayload=null;
+  for(const o of outputs){ const p=extractAnchorOutput(o.script); if(p){ anchorPayload=bytesToHex(p); break; } }
+  return { txid, anchorOutputHex:anchorPayload };
 }
 
-/* ---------- §6 witness inscription (original bytes live IN the reveal witness) ----------
+/* ---------- §6 witness inscription (original bytes live IN the anchor witness) ----------
    Mirrors verify-cli/verify.py (cross-checked in CI). The witness is NOT in the
    txid (malleable), so we bind the recovered bytes to record.leaf_bytes — which
-   IS txid-committed via the OP_RETURN — never to a self-declared value. */
+   IS txid-committed via the anchor output — never to a self-declared value. */
 function extractWitnessItems(hexStr, inputIndex){
   const r=new Reader(hexToBytes(hexStr));
   r.take(4);                                  // version
@@ -320,31 +320,31 @@ async function verifyWitnessBundle(bundle){
   const a=bundle.anchor, record=bundle.record, wit=a.witness_envelope;
   const leaf=record.leaf_bytes.toLowerCase(), raw=a.reveal_tx_hex;
   let allOk=true, txid=a.reveal_txid;
-  if(!raw){ renderStep("bad","1 · Transaction binding — no reveal_tx_hex","a witness bundle needs the raw reveal tx");
+  if(!raw){ renderStep("bad","1 · Transaction binding — no raw anchor tx","a witness bundle needs the raw anchor tx");
     verdict(false,"VERIFICATION FAILED","This witness bundle cannot be verified offline."); return; }
   try {
     const t=await txidFromRaw(raw); txid=t.txid;
-    const txidOk=eqHex(t.txid,a.reveal_txid||""), opOk=eqHex(t.opReturnHex||"",a.op_return_payload_hex||"");
-    renderStep(txidOk&&opOk?"ok":"bad","1 · Transaction binding — OP_RETURN "+(txidOk&&opOk?"belongs to":"does NOT match")+" reveal_txid",
+    const txidOk=eqHex(t.txid,a.reveal_txid||""), opOk=eqHex(t.anchorOutputHex||"",a.op_return_payload_hex||"");
+    renderStep(txidOk&&opOk?"ok":"bad","1 · Transaction binding — anchor output "+(txidOk&&opOk?"belongs to":"does NOT match")+" the anchor txid",
       "computed txid: "+t.txid+"<br>bundle  txid: "+a.reveal_txid);
     allOk=allOk&&txidOk&&opOk;
-    // Mode detection: a BC01/BC30 magic in the OP_RETURN → UNIFIED (merkle-bind);
-    // a raw 32-byte payload with no magic → LEGACY (OP_RETURN == leaf_bytes).
+    // Mode detection: a BC01/BC30 magic in the anchor output → UNIFIED (merkle-bind);
+    // a raw 32-byte payload with no magic → LEGACY (anchor output == leaf_bytes).
     let decoded=null;
-    try { decoded=decodeOpReturn(a.op_return_payload_hex); } catch(e){ decoded=null; }
+    try { decoded=decodeAnchorPayload(a.op_return_payload_hex); } catch(e){ decoded=null; }
     if(decoded===null){
       // LEGACY — the inscribed document IS the directly-committed leaf.
-      const rootOk=eqHex(t.opReturnHex||"",leaf);
-      renderStep(rootOk?"ok":"bad","2 · On-chain commitment — OP_RETURN root "+(rootOk?"==":"≠")+" record.leaf_bytes",
-        "the inscribed document IS the committed leaf<br>on-chain root: "+(t.opReturnHex||""));
+      const rootOk=eqHex(t.anchorOutputHex||"",leaf);
+      renderStep(rootOk?"ok":"bad","2 · On-chain commitment — anchor output root "+(rootOk?"==":"≠")+" record.leaf_bytes",
+        "the inscribed document IS the committed leaf<br>on-chain root: "+(t.anchorOutputHex||""));
       allOk=allOk&&rootOk;
     } else {
       // UNIFIED — bind leaf_bytes to the on-chain merkle_root via the proof.
       const anchored=decoded.merkle_root;
       const m=await verifyMerkle(record, bundle.merkle);
       const rootOk=m.ok&&eqHex(m.computedRoot,anchored);
-      renderStep(rootOk?"ok":"bad","2 · On-chain commitment — record "+(rootOk?"binds to":"does NOT bind to")+" the OP_RETURN merkle_root ("+decoded.format+")",
-        "recomputed root:    "+m.computedRoot+"<br>OP_RETURN merkle_root: "+anchored);
+      renderStep(rootOk?"ok":"bad","2 · On-chain commitment — record "+(rootOk?"binds to":"does NOT bind to")+" the anchor output merkle_root ("+decoded.format+")",
+        "recomputed root:    "+m.computedRoot+"<br>anchor output merkle_root: "+anchored);
       allOk=allOk&&rootOk;
     }
   } catch(e){ allOk=false; renderStep("bad","1 · Transaction binding — error","//"+e.message); }
@@ -486,7 +486,7 @@ async function verify(){
   }
   renderStep("ok","Schema "+bundle.schema+" · network: "+(bundle.bitcoin_network||"?"));
 
-  // Witness-inscription bundles carry the original IN the reveal witness — verify
+  // Witness-inscription bundles carry the original IN the anchor witness — verify
   // via the dedicated path (bind recovered bytes → record.leaf_bytes) and return.
   if(bundle.anchor && bundle.anchor.witness_envelope){ await verifyWitnessBundle(bundle); return; }
 
@@ -525,29 +525,29 @@ async function verify(){
     allOk=allOk&&m.ok;
   } catch(e){ allOk=false; renderStep("bad","1 · Merkle inclusion — error","//"+e.message); }
 
-  // §4.1 OP_RETURN commitment — v2 commits day_root (binds the balance root AND
+  // §4.1 anchor output commitment — v2 commits day_root (binds the balance root AND
   // the (a)/(b)/(c) reconciliation); v1 commits the bare Merkle root. The 32-byte
   // slot is decoded.merkle_root in both. Branch on the reconciliation section.
   let decoded=null, expectedDayRoot=null;
   const reconSec=bundle.reconciliation;
   try {
-    decoded=decodeOpReturn(bundle.anchor.op_return_payload_hex);
+    decoded=decodeAnchorPayload(bundle.anchor.op_return_payload_hex);
     const anchored=decoded.merkle_root;
     if(reconSec){
       const ce=(bundle.chain&&bundle.chain.entry)||{};
       const rc=await reconCommitment(ce.exchange_id, ce.business_date, reconSec.reconciliation_ok, reconSec.assets||[]);
       expectedDayRoot=bytesToHex(await dayRoot(ce.exchange_id, ce.business_date, merkleRoot, rc));
       const ok=merkleRoot && eqHex(expectedDayRoot,anchored);
-      renderStep(ok?"ok":"bad","2 · OP_RETURN commitment — day_root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
-        "OP_RETURN day_root:  "+anchored+"<br>recomputed day_root: "+expectedDayRoot+(ok?"":"<br>does not match"));
+      renderStep(ok?"ok":"bad","2 · anchor output commitment — day_root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
+        "anchor output day_root:  "+anchored+"<br>recomputed day_root: "+expectedDayRoot+(ok?"":"<br>does not match"));
       allOk=allOk&&ok;
     } else {
       const ok=merkleRoot && eqHex(anchored,merkleRoot);
-      renderStep(ok?"ok":"bad","2 · OP_RETURN commitment — root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
-        "OP_RETURN merkle_root: "+anchored+(ok?"":"<br>does not equal the Merkle root above"));
+      renderStep(ok?"ok":"bad","2 · anchor output commitment — root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
+        "anchor output merkle_root: "+anchored+(ok?"":"<br>does not equal the Merkle root above"));
       allOk=allOk&&ok;
     }
-  } catch(e){ allOk=false; renderStep("bad","2 · OP_RETURN commitment — error","//"+e.message); }
+  } catch(e){ allOk=false; renderStep("bad","2 · anchor output commitment — error","//"+e.message); }
 
   // §4.2 offline txid binding
   let txid=bundle.anchor.reveal_txid;
@@ -555,17 +555,17 @@ async function verify(){
     try {
       const t=await txidFromRaw(bundle.anchor.reveal_tx_hex);
       const txidOk=eqHex(t.txid,bundle.anchor.reveal_txid);
-      const opOk=decoded && eqHex(t.opReturnHex||"",bundle.anchor.op_return_payload_hex);
+      const opOk=decoded && eqHex(t.anchorOutputHex||"",bundle.anchor.op_return_payload_hex);
       const ok=txidOk&&opOk;
-      renderStep(ok?"ok":"bad","3 · Transaction binding — OP_RETURN "+(ok?"belongs to":"does NOT match")+" reveal_txid",
+      renderStep(ok?"ok":"bad","3 · Transaction binding — anchor output "+(ok?"belongs to":"does NOT match")+" the anchor txid",
         "computed txid: "+t.txid+"<br>bundle  txid: "+bundle.anchor.reveal_txid+
-        "<br>OP_RETURN in raw tx "+(opOk?"matches payload ✓":"MISMATCH ✕"));
+        "<br>anchor output in raw tx "+(opOk?"matches payload ✓":"MISMATCH ✕"));
       allOk=allOk&&ok; txid=t.txid;
     } catch(e){ allOk=false; renderStep("bad","3 · Transaction binding — error","//"+e.message); }
   } else {
-    renderStep("warn","3 · Transaction binding — skipped (no reveal_tx_hex)",
-      "Bundle states reveal_txid="+txid+" but did not include the raw tx; "+
-      "cannot cryptographically bind OP_RETURN to the txid. Trust level reduced.");
+    renderStep("warn","3 · Transaction binding — skipped (no raw anchor tx)",
+      "Bundle states anchor txid="+txid+" but did not include the raw tx; "+
+      "cannot cryptographically bind anchor output to the txid. Trust level reduced.");
   }
 
   // §5 chain (optional) — per-exchange tamper-evident continuity (link D).
@@ -595,7 +595,7 @@ async function verify(){
   }
 
   // §6 reconciliation (v2, informational) — the (a)/(b)/(c) the day_root commits
-  // to. Gated already by §2/§4.1 (day_root == OP_RETURN) + §5 (body_hash); this
+  // to. Gated already by §2/§4.1 (day_root == anchor output) + §5 (body_hash); this
   // just renders the figures. The (a) reserve side is exchange-supplied.
   if(bundle.reconciliation){
     const rs=bundle.reconciliation, rows=rs.assets||[];

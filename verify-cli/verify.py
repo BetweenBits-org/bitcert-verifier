@@ -29,7 +29,7 @@ import json
 import sys
 
 SCHEMA = "bitcert-proof-bundle/v1"
-# v2 adds the daily `reconciliation` section: the OP_RETURN commits `day_root`
+# v2 adds the daily `reconciliation` section: the anchor output commits `day_root`
 # (binds the balance root + the (a)/(b)/(c) reconciliation) instead of the bare
 # Merkle root. The verifier accepts both and branches on the `reconciliation`
 # section's presence (NOT the version string alone).
@@ -70,8 +70,8 @@ def verify_merkle(record, m):
     computed = cur.hex()
     return computed, (computed.lower() == m["root"].lower())
 
-# ----- §4.1 OP_RETURN decode -----
-def decode_op_return(payload_hex):
+# ----- §4.1 anchor output decode -----
+def decode_anchor_payload(payload_hex):
     b = bytes.fromhex(payload_hex)
     magic = b[:4].decode("latin1")
     if magic == "BC01":
@@ -85,7 +85,7 @@ def decode_op_return(payload_hex):
         return {"format": "BC30", "version": b[4], "flags": b[5],
                 "batch_id": b[6:22].hex(), "merkle_root": b[22:54].hex(),
                 "aux": b[54:86].hex()}
-    raise ValueError("unknown OP_RETURN magic (expected BC01/BC30)")
+    raise ValueError("unknown anchor output magic (expected BC01/BC30)")
 
 # ----- §4.2 raw tx parse + legacy txid -----
 class _R:
@@ -137,8 +137,8 @@ def parse_tx(hex_str):
     parts.append(r.take(4))                   # locktime
     return b"".join(parts), scripts
 
-def extract_op_return(script):
-    if len(script) < 1 or script[0] != 0x6a:  # OP_RETURN
+def extract_anchor_output(script):
+    if len(script) < 1 or script[0] != 0x6a:  # anchor output
         return None
     o = 1
     if o >= len(script): return b""
@@ -153,19 +153,19 @@ def extract_op_return(script):
 def txid_from_raw(hex_str):
     legacy, scripts = parse_tx(hex_str)
     txid = sha256d(legacy)[::-1].hex()        # display (big-endian) order
-    opret = None
+    anchor_payload = None
     for s in scripts:
-        p = extract_op_return(s)
+        p = extract_anchor_output(s)
         if p is not None:
-            opret = p.hex(); break
-    return txid, opret
+            anchor_payload = p.hex(); break
+    return txid, anchor_payload
 
 # ----- §6 witness inscription (the original bytes live IN the reveal witness) -----
 def extract_witness_items(hex_str, input_index):
     """Return the list of witness stack elements for `input_index`, or None for a
     non-segwit tx. The witness is NOT in the txid (malleable) — callers MUST bind
     the recovered bytes to record.leaf_bytes (which IS txid-committed via the
-    OP_RETURN), never trust the witness alone."""
+    anchor output), never trust the witness alone."""
     r = _R(bytes.fromhex(hex_str))
     r.take(4)                                  # version
     if r.b[r.o:r.o + 2] != b"\x00\x01":        # not segwit -> no witness
@@ -217,14 +217,14 @@ def verify_witness_bundle(bundle, explorer=None):
     the reveal tx WITNESS (no off-bundle file needed) and bound to
     record.leaf_bytes — which IS txid-committed. Dual-mode (UNIFIED-WITNESS-CONTRACT):
 
-      • LEGACY  — OP_RETURN is a raw 32 B = leaf_bytes (no BC magic). The
-        inscribed document IS the directly-committed leaf (step 2: OP_RETURN ==
+      • LEGACY  — anchor output is a raw 32 B = leaf_bytes (no BC magic). The
+        inscribed document IS the directly-committed leaf (step 2: anchor output ==
         leaf_bytes; step 3: sha256(body) == leaf_bytes).
-      • UNIFIED — OP_RETURN is BC01/BC30(merkle_root). The leaf is bound to the
+      • UNIFIED — anchor output is BC01/BC30(merkle_root). The leaf is bound to the
         on-chain root THROUGH the Merkle proof (step 2: verify_merkle(record) ==
         decoded.merkle_root; step 3: sha256(body) == leaf_bytes, unchanged).
 
-    Mode is decided by decoding the OP_RETURN: a recognised BC magic → UNIFIED,
+    Mode is decided by decoding the anchor output: a recognised BC magic → UNIFIED,
     a raw 32-byte payload with no magic → LEGACY. A tampered witness body fails
     the bind; a swapped tx fails the txid check; a forged Merkle proof fails the
     unified root check."""
@@ -239,32 +239,32 @@ def verify_witness_bundle(bundle, explorer=None):
               "a witness bundle cannot be verified without the raw reveal tx")
         return False
     try:
-        computed_txid, opret = txid_from_raw(raw)
+        computed_txid, anchor_payload = txid_from_raw(raw)
         txid_ok = computed_txid.lower() == (anchor.get("reveal_txid") or "").lower()
-        op_ok = (opret or "").lower() == anchor["op_return_payload_hex"].lower()
+        op_ok = (anchor_payload or "").lower() == anchor["op_return_payload_hex"].lower()
         _line("ok" if txid_ok and op_ok else "bad",
-              "1 · Transaction binding — OP_RETURN %s reveal_txid" %
+              "1 · Transaction binding — anchor output %s reveal_txid" %
               ("belongs to" if txid_ok and op_ok else "does NOT match"),
               "computed txid: %s\nbundle  txid: %s" % (computed_txid, anchor.get("reveal_txid")))
         all_ok &= txid_ok and op_ok
     except Exception as e:
         _line("bad", "1 · Transaction binding — error", str(e)); return False
 
-    # Mode detection: a BC01/BC30 magic in the OP_RETURN → UNIFIED (merkle-bind);
-    # a raw 32-byte payload with no magic → LEGACY (OP_RETURN == leaf_bytes).
+    # Mode detection: a BC01/BC30 magic in the anchor output → UNIFIED (merkle-bind);
+    # a raw 32-byte payload with no magic → LEGACY (anchor output == leaf_bytes).
     decoded = None
     try:
-        decoded = decode_op_return(anchor["op_return_payload_hex"])
+        decoded = decode_anchor_payload(anchor["op_return_payload_hex"])
     except Exception:
         decoded = None
 
     if decoded is None:
         # LEGACY — the inscribed document IS the directly-committed leaf.
-        root_ok = (opret or "").lower() == leaf
+        root_ok = (anchor_payload or "").lower() == leaf
         _line("ok" if root_ok else "bad",
-              "2 · On-chain commitment — OP_RETURN root %s record.leaf_bytes" %
+              "2 · On-chain commitment — anchor output root %s record.leaf_bytes" %
               ("== " if root_ok else "≠ "),
-              "on-chain root: %s" % (opret or ""))
+              "on-chain root: %s" % (anchor_payload or ""))
         all_ok &= root_ok
     else:
         # UNIFIED — bind leaf_bytes to the on-chain merkle_root via the proof.
@@ -273,9 +273,9 @@ def verify_witness_bundle(bundle, explorer=None):
             computed_root, merkle_ok = verify_merkle(record, bundle["merkle"])
             root_ok = merkle_ok and computed_root.lower() == anchored.lower()
             _line("ok" if root_ok else "bad",
-                  "2 · On-chain commitment — record %s the OP_RETURN merkle_root (%s)" %
+                  "2 · On-chain commitment — record %s the anchor output merkle_root (%s)" %
                   ("binds to" if root_ok else "does NOT bind to", decoded["format"]),
-                  "recomputed root:    %s\nOP_RETURN merkle_root: %s" % (computed_root, anchored))
+                  "recomputed root:    %s\nanchor output merkle_root: %s" % (computed_root, anchored))
             all_ok &= root_ok
         except Exception as e:
             _line("bad", "2 · On-chain commitment — error", str(e)); return False
@@ -510,15 +510,15 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
     except Exception as e:
         all_ok = False; _line("bad", "1 · Merkle inclusion — error", str(e))
 
-    # §4.1 OP_RETURN — v2 commits the day_root (binds the balance root AND the
+    # §4.1 anchor output — v2 commits the day_root (binds the balance root AND the
     # (a)/(b)/(c) reconciliation); v1 commits the bare merkle_root. The 32-byte
-    # OP_RETURN slot is `decoded["merkle_root"]` in both (the field name is
+    # anchor output slot is `decoded["merkle_root"]` in both (the field name is
     # historical). Branch on the presence of the reconciliation section.
     decoded = None
     expected_day_root = None  # set in the v2 path; reused by §5 body_hash check
     recon_sec = bundle.get("reconciliation")
     try:
-        decoded = decode_op_return(bundle["anchor"]["op_return_payload_hex"])
+        decoded = decode_anchor_payload(bundle["anchor"]["op_return_payload_hex"])
         anchored = decoded["merkle_root"]
         if recon_sec:
             ce = (bundle.get("chain") or {}).get("entry") or {}
@@ -528,32 +528,32 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
                                          merkle_root, rc).hex()
             ok = merkle_root is not None and expected_day_root.lower() == anchored.lower()
             _line("ok" if ok else "bad",
-                  "2 · OP_RETURN commitment — day_root is %s on-chain (%s)" %
+                  "2 · anchor output commitment — day_root is %s on-chain (%s)" %
                   ("committed" if ok else "NOT committed", decoded["format"]),
-                  "OP_RETURN day_root:  %s\nrecomputed day_root: %s" % (anchored, expected_day_root))
+                  "anchor output day_root:  %s\nrecomputed day_root: %s" % (anchored, expected_day_root))
         else:
             ok = merkle_root is not None and anchored.lower() == merkle_root.lower()
             _line("ok" if ok else "bad",
-                  "2 · OP_RETURN commitment — root is %s on-chain (%s)" %
+                  "2 · anchor output commitment — root is %s on-chain (%s)" %
                   ("committed" if ok else "NOT committed", decoded["format"]),
-                  "OP_RETURN merkle_root: %s" % anchored)
+                  "anchor output merkle_root: %s" % anchored)
         all_ok &= ok
     except Exception as e:
-        all_ok = False; _line("bad", "2 · OP_RETURN commitment — error", str(e))
+        all_ok = False; _line("bad", "2 · anchor output commitment — error", str(e))
 
     # §4.2 txid binding
     txid = bundle["anchor"].get("reveal_txid")
     raw = bundle["anchor"].get("reveal_tx_hex")
     if raw:
         try:
-            computed_txid, opret = txid_from_raw(raw)
+            computed_txid, anchor_payload = txid_from_raw(raw)
             txid_ok = computed_txid.lower() == (bundle["anchor"]["reveal_txid"] or "").lower()
-            op_ok = (opret or "").lower() == bundle["anchor"]["op_return_payload_hex"].lower()
+            op_ok = (anchor_payload or "").lower() == bundle["anchor"]["op_return_payload_hex"].lower()
             ok = txid_ok and op_ok
             _line("ok" if ok else "bad",
-                  "3 · Transaction binding — OP_RETURN %s reveal_txid" %
+                  "3 · Transaction binding — anchor output %s the anchor txid" %
                   ("belongs to" if ok else "does NOT match"),
-                  "computed txid: %s\nbundle  txid: %s\nOP_RETURN in raw tx %s" %
+                  "computed txid: %s\nbundle  txid: %s\nanchor output in raw tx %s" %
                   (computed_txid, bundle["anchor"]["reveal_txid"],
                    "matches ✓" if op_ok else "MISMATCH ✗"))
             all_ok &= ok; txid = computed_txid
@@ -561,7 +561,7 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
             all_ok = False; _line("bad", "3 · Transaction binding — error", str(e))
     else:
         _line("warn", "3 · Transaction binding — skipped (no reveal_tx_hex)",
-              "cannot bind OP_RETURN to txid; trust level reduced")
+              "cannot bind anchor output to txid; trust level reduced")
 
     # §5 chain (optional) — per-exchange tamper-evident continuity (link D).
     # Content-consistency is cryptographic and DOES gate the verdict (a forged
@@ -607,7 +607,7 @@ def verify_bundle(bundle, explorer=None, original_bytes=None, account_id=None, s
 
     # §6 reconciliation (v2, informational) — the (a)/(b)/(c) trust computation
     # the day_root commits to. The commitment is already gated by §2/§4.1 (day_root
-    # == OP_RETURN) + §5 (body_hash == day_root); this just renders the figures.
+    # == anchor output) + §5 (body_hash == day_root); this just renders the figures.
     # NOTE: the (a) reserve side is exchange-supplied, NOT independently measured.
     if recon_sec:
         try:

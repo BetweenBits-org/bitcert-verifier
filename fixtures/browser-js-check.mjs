@@ -15,7 +15,7 @@ const cut = script.indexOf("/* ---------- UI plumbing");
 const pure = script.slice(0, cut);
 
 const factory = new Function(
-  pure + "\nreturn {hexToBytes,bytesToHex,verifyMerkle,decodeOpReturn,txidFromRaw," +
+  pure + "\nreturn {hexToBytes,bytesToHex,verifyMerkle,decodeAnchorPayload,txidFromRaw," +
          "payloadHash,verifyChainLinks,verifyPreimage,eqHex," +
          "extractWitnessItems,parseEnvelope,sha256};"
 );
@@ -36,11 +36,11 @@ console.log("browser-js vs fixtures:");
 {
   const m = await F.verifyMerkle(valid.record, valid.merkle);
   expect(m.ok, "valid: merkle inclusion holds");
-  const d = F.decodeOpReturn(valid.anchor.op_return_payload_hex);
-  expect(F.eqHex(d.merkle_root, valid.merkle.root), "valid: OP_RETURN root == merkle root");
+  const d = F.decodeAnchorPayload(valid.anchor.op_return_payload_hex);
+  expect(F.eqHex(d.merkle_root, valid.merkle.root), "valid: anchor output root == merkle root");
   const t = await F.txidFromRaw(valid.anchor.reveal_tx_hex);
   expect(F.eqHex(t.txid, valid.anchor.reveal_txid), "valid: computed txid == reveal_txid (" + t.txid + ")");
-  expect(F.eqHex(t.opReturnHex, valid.anchor.op_return_payload_hex), "valid: raw-tx OP_RETURN == payload");
+  expect(F.eqHex(t.anchorOutputHex, valid.anchor.op_return_payload_hex), "valid: raw-tx anchor output == payload");
   const ph = await F.payloadHash(valid.chain.entry);
   expect(F.eqHex(ph, valid.chain.entry.payload_hash), "valid: chain payload_hash recomputes");
 }
@@ -101,7 +101,7 @@ async function jsWitnessDecision(b) {
   const env = F.parseEnvelope(items[1]);            // { tag, contentType, body }
   const bodyHash = F.bytesToHex(await F.sha256(env.body));
   let decoded = null;
-  try { decoded = F.decodeOpReturn(anchor.op_return_payload_hex); } catch { decoded = null; }
+  try { decoded = F.decodeAnchorPayload(anchor.op_return_payload_hex); } catch { decoded = null; }
   const mode = decoded ? "UNIFIED" : "LEGACY";
   let rootOk;
   if (mode === "UNIFIED") {
@@ -114,17 +114,17 @@ async function jsWitnessDecision(b) {
 }
 {
   const legacy = await jsWitnessDecision(load("06-witness-inscription.json"));
-  expect(legacy.mode === "LEGACY", "witness 06: mode LEGACY (raw-32 OP_RETURN)");
-  expect(legacy.rootOk, "witness 06: OP_RETURN == leaf_bytes");
+  expect(legacy.mode === "LEGACY", "witness 06: mode LEGACY (raw-32 anchor output)");
+  expect(legacy.rootOk, "witness 06: anchor output == leaf_bytes");
   expect(legacy.bound, "witness 06: sha256(body) binds to leaf_bytes");
 
   const unified = await jsWitnessDecision(load("07-witness-unified.json"));
-  expect(unified.mode === "UNIFIED", "witness 07: mode UNIFIED (BC30 OP_RETURN)");
+  expect(unified.mode === "UNIFIED", "witness 07: mode UNIFIED (BC30 anchor output)");
   expect(unified.rootOk, "witness 07: merkle root == decoded BC30 merkle_root");
   expect(unified.bound, "witness 07: sha256(PDF body) binds to leaf_bytes");
 
   const tampered = await jsWitnessDecision(load("07-witness-unified.tampered.json"));
-  expect(tampered.mode === "UNIFIED", "witness 07-tampered: still UNIFIED (txid/OP_RETURN intact)");
+  expect(tampered.mode === "UNIFIED", "witness 07-tampered: still UNIFIED (txid/anchor output intact)");
   expect(tampered.rootOk, "witness 07-tampered: anchor binding still holds (malleable witness)");
   expect(!tampered.bound, "witness 07-tampered: tampered body correctly does NOT bind");
 }

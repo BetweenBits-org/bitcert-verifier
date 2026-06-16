@@ -61,7 +61,7 @@ Exit code `0` = all cryptographic checks passed.
 
 ```
  original record ──link A──▶ leaf_bytes ──link B──▶ merkle root ──link C──▶ Bitcoin
-  (your PDF /                  32 bytes      (inclusion          (OP_RETURN → txid → block)
+  (your PDF /                  32 bytes      (inclusion          (anchor output → txid → block)
    your balance)                              proof)
 ```
 
@@ -76,8 +76,8 @@ Exit code `0` = all cryptographic checks passed.
 |---|-------|----------------|
 | 0 | **Original binding** *(link A, optional)* — recompute `leaf_bytes` from the original you supply: `SHA-256(file)` for a document, or `SHA-256(domain‖JCS{asset,balance_minor,user_commitment})` for a daily balance (and `user_commitment=SHA-256(salt‖account)`). | No |
 | 1 | **Merkle inclusion** — the leaf folds up to the claimed Merkle root (RFC-6962, `H_leaf=SHA256(0x00‖d)`, `H_node=SHA256(0x01‖l‖r)`). | No |
-| 2 | **OP_RETURN commitment** — that root is the value committed inside the transaction's `OP_RETURN` (BC01/BC30). | No |
-| 3 | **Transaction binding** — those `OP_RETURN` bytes belong to *exactly* the stated `reveal_txid`, by recomputing the txid as double-SHA-256 of the raw transaction. | No |
+| 2 | **anchor output commitment** — that root is the value committed inside the transaction's `anchor output` (BC01/BC30). | No |
+| 3 | **Transaction binding** — those `anchor output` bytes belong to *exactly* the stated anchor txid, by recomputing the txid as double-SHA-256 of the raw transaction. | No |
 | 4 | **Chain continuity** *(optional)* — per-exchange `payload_hash`/`prev_entry_hash` links recompute. | No |
 | 5 | **On-chain confirmation** *(optional)* — the txid sits in a block with enough confirmations, via a Bitcoin source **you** choose. | Yes — your node / any explorer, **never BitCert** |
 

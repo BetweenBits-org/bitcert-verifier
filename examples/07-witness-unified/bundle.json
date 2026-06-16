@@ -10,7 +10,7 @@
       "content_type": "application/pdf"
     },
     "descriptor": {
-      "note": "UNIFIED-WITNESS-CONTRACT KAT \u2014 PDF in the reveal witness + BC30(merkle_root) OP_RETURN (one tx, one anchor)"
+      "note": "UNIFIED-WITNESS-CONTRACT KAT \u2014 PDF in the reveal witness + BC30(merkle_root) anchor output (one tx, one anchor)"
     }
   },
   "merkle": {
