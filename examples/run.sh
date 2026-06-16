@@ -24,7 +24,7 @@ echo "== 05 daily-chain-walkback (§5 continuity via chain.links) =="
 check "05 chain walk-back"    0 $CLI 05-daily-chain-walkback/bundle.json --account alice@demoex --salt 5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e
 echo "== 06 daily day_root (v2: anchor commits the reconciliation) =="
 check "06 day_root v2"        0 $CLI 06-daily-day-root/bundle.json --account alice@demoex --salt 5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e
-echo "== 07 witness-unified (PDF in witness + BC30 OP_RETURN, merkle-bind) =="
+echo "== 07 witness-unified (PDF in witness + BC30 anchor output, merkle-bind) =="
 check "07 witness unified"    0 $CLI 07-witness-unified/bundle.json
 echo "== 08 tampered-witness (malleable body must be caught at step 3) =="
 check "08 tampered witness"   1 $CLI 08-tampered-witness/bundle.json

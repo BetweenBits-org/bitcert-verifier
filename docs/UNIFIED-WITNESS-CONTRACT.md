@@ -3,7 +3,7 @@
 > **Status:** CONTRACT (frozen for the W2/W3 implementation agents). This is the
 > authoritative byte-and-bundle specification for **audit-anchor consolidation**:
 > one Bitcoin reveal transaction that carries **both** the Merkle anchor
-> (`OP_RETURN = BC30(merkle_root)`) **and** the audit PDF (BIP-342 tapscript
+> (`anchor output = BC30(merkle_root)`) **and** the audit PDF (BIP-342 tapscript
 > witness), replacing today's **two separate** transactions for *single-mode*
 > audit anchors.
 >
@@ -19,22 +19,22 @@
 Today an *inscribed* single-mode audit anchor needs **two** reveal txs:
 
 - **① the anchor reveal** — `services/anchoring`, key-path P2TR spend, output[0] =
-  `OP_RETURN(BC30(merkle_root))` (`bitcoin_tx.rs` + `op_return_placeholder.rs` /
+  `anchor output(BC30(merkle_root))` (`bitcoin_tx.rs` + `op_return_placeholder.rs` /
   the BC30 encoder). The Merkle root is txid-committed and walked back to a block.
 - **② the witness reveal** — `services/inscription`, script-path P2TR spend, the
-  PDF bytes inscribed in a BIP-342 tapscript envelope, output[0] = `OP_RETURN =
+  PDF bytes inscribed in a BIP-342 tapscript envelope, output[0] = `anchor output =
   leaf_bytes` (raw 32 B = `sha256(PDF)`). See `executor.rs` today.
 
 The **unified** target collapses ① and ② into **one reveal**: a script-path
-spend whose witness carries the PDF envelope **and** whose `OP_RETURN` carries
+spend whose witness carries the PDF envelope **and** whose `anchor output` carries
 `BC30(merkle_root)` (the standard anchor). One tx, one fee, one confirmation —
 and the bundle's `anchor` is simultaneously the standard anchor *and* the witness
 carrier.
 
-**Load-bearing consequence:** in the unified tx, `OP_RETURN` is **no longer**
+**Load-bearing consequence:** in the unified tx, `anchor output` is **no longer**
 equal to `leaf_bytes`. It is `BC30(merkle_root)`. The verifier must bind the
 recovered witness body to `record.leaf_bytes` **through the Merkle proof**, not by
-the legacy `OP_RETURN == leaf_bytes` short-circuit. Both branches must coexist
+the legacy `anchor output == leaf_bytes` short-circuit. Both branches must coexist
 (backward compat with the existing 4-tx / legacy-② bundles already on-chain).
 
 ---
@@ -42,7 +42,7 @@ the legacy `OP_RETURN == leaf_bytes` short-circuit. Both branches must coexist
 ## 1. Unified reveal transaction layout
 
 One reveal tx, **script-path** spend (BIP-342) of the inscription commit output —
-the same envelope mechanism as legacy ②, **only the `OP_RETURN` payload differs**.
+the same envelope mechanism as legacy ②, **only the `anchor output` payload differs**.
 
 ```
 reveal tx (version 2):
@@ -54,7 +54,7 @@ reveal tx (version 2):
                         control_block(33B) ]          // witness[2] — single-leaf control block
   output[0]:
     value           = 0
-    scriptPubKey    = OP_RETURN <push BC30(merkle_root)>   // ← BC30, NOT leaf_bytes (this is the whole change)
+    scriptPubKey    = anchor output <push BC30(merkle_root)>   // ← BC30, NOT leaf_bytes (this is the whole change)
   output[1]:
     value           = change (commit_value − reveal_fee, > P2TR dust)
     scriptPubKey    = P2TR change back to the wallet
@@ -94,22 +94,22 @@ OP_ENDIF
 |---|---|---|
 | witness `[sig, script, control]` | yes | yes (identical) |
 | spend type | script-path (BIP-342) | script-path (BIP-342) |
-| `OP_RETURN` payload | **raw 32 B = `leaf_bytes` = `sha256(PDF)`** | **`BC30(merkle_root)` — 86 B** |
+| `anchor output` payload | **raw 32 B = `leaf_bytes` = `sha256(PDF)`** | **`BC30(merkle_root)` — 86 B** |
 | merkle section in bundle | absent | **REQUIRED** |
-| verifier branch | legacy (`OP_RETURN == leaf_bytes`) | unified (merkle-bind) |
+| verifier branch | legacy (`anchor output == leaf_bytes`) | unified (merkle-bind) |
 
 ---
 
-## 2. `BC30` OP_RETURN exact byte layout (reproducible)
+## 2. `BC30` anchor output exact byte layout (reproducible)
 
-The OP_RETURN **data payload** (the bytes pushed after `OP_RETURN`, i.e. without
+The anchor output **data payload** (the bytes pushed after `anchor output`, i.e. without
 the `0x6a` opcode and without the push opcode/length) is **86 bytes**:
 
 ```
 offset  len  field
 ------  ---  --------------------------------------------------------------
 0..4     4   magic  "BC30"           = 42 43 33 30
-4..5     1   version 0x1E (= 30)     ( = anchoring_engine OP_RETURN_V30_VERSION )
+4..5     1   version 0x1E (= 30)     ( = anchoring_engine anchor output_V30_VERSION )
 5..6     1   flags                   ( bit 0 = WITNESS_PRESENT ; set 0x01 for unified )
 6..22   16   batch_id (UUIDv7 raw 16 B)
 22..54  32   merkle_root             ← the 32-byte slot the verifier extracts
@@ -130,12 +130,12 @@ matching `bitcoin_tx.rs` `bc30_encoder_produces_86_byte_op_return`):
 6a 4c 56 <86 payload bytes>
 └┬ └┬ └┬─ length = 0x56 = 86
  │  └─── OP_PUSHDATA1 (0x4c)
- └────── OP_RETURN (0x6a)
+ └────── anchor output (0x6a)
 ```
 
 > **Flags note for W2:** the legacy single-anchor BC30 (`services/anchoring`)
 > writes `flags = 0x00`. The *unified* reveal SHOULD set `flags = 0x01`
-> (`WITNESS_PRESENT`) so a chain observer can tell, from the OP_RETURN alone, that
+> (`WITNESS_PRESENT`) so a chain observer can tell, from the anchor output alone, that
 > the reveal also inscribes the artifact in its witness. The flags byte is **not**
 > part of the commitment check (verifiers extract only the `merkle_root` slot);
 > it is advisory. Keep `aux_commitment = 00 × 32`.
@@ -148,8 +148,8 @@ matching `bitcoin_tx.rs` `bc30_encoder_produces_86_byte_op_return`):
 
 `services/inscription/src/witness/executor.rs` today builds output[0] as
 `ScriptBuf::new_op_return(req.payload_hash)` (raw 32 B). W2 replaces that with
-`OP_RETURN(BC30(merkle_root))` for the unified single-mode path. The `payload_hash`
-field is no longer the OP_RETURN content in unified mode; the binding to the PDF is
+`anchor output(BC30(merkle_root))` for the unified single-mode path. The `payload_hash`
+field is no longer the anchor output content in unified mode; the binding to the PDF is
 now `record.leaf_bytes` reached via the Merkle proof (§3, §4).
 
 ---
@@ -204,12 +204,12 @@ and `proof_view.rs` `leaf_hash_matches_rfc6962_domain_tag`).
 
 ## 4. Verifier dual-mode specification
 
-The verifier decides mode by **decoding the OP_RETURN**:
+The verifier decides mode by **decoding the anchor output**:
 
 ```
 decoded = decode_op_return(anchor.op_return_payload_hex)
 if decoded recognises a BC01/BC30 magic   →  UNIFIED mode  (merkle-bind)
-else (raw 32 B, no magic)                 →  LEGACY mode   (OP_RETURN == leaf_bytes)
+else (raw 32 B, no magic)                 →  LEGACY mode   (anchor output == leaf_bytes)
 ```
 
 Both branches run only when `anchor.witness_envelope` is present (the witness
@@ -218,19 +218,19 @@ flow (§3/§4 of `bundle-schema.md`); it is unaffected.
 
 ### 4.1 LEGACY branch — UNCHANGED (backward compat)
 
-Existing legacy-② / 4-tx witness bundles where `OP_RETURN == leaf_bytes` and there
+Existing legacy-② / 4-tx witness bundles where `anchor output == leaf_bytes` and there
 is **no** Merkle section. Verbatim today's `verify_witness_bundle` /
 `verifyWitnessBundle`:
 
 ```
 1. txid(reveal_tx_hex) == anchor.reveal_txid                       (§4.2 txid binding)
-2. OP_RETURN(reveal_tx_hex) == op_return_payload_hex == leaf_bytes (the doc IS the committed leaf)
+2. anchor output(reveal_tx_hex) == op_return_payload_hex == leaf_bytes (the doc IS the committed leaf)
 3. body = concat(envelope pushes after content_type)
    ASSERT sha256(body) == record.leaf_bytes        ← bind to leaf_bytes
 4. (optional) confirm reveal_txid on a Bitcoin source of your choosing
 ```
 
-Detection: `decode_op_return` raises "unknown OP_RETURN magic" → the 32-byte raw
+Detection: `decode_op_return` raises "unknown anchor output magic" → the 32-byte raw
 payload is *not* a BC0x envelope → LEGACY. (Equivalently: `op_return_payload_hex`
 is 64 hex chars / 32 bytes with no BC magic.)
 
@@ -241,7 +241,7 @@ present:
 
 ```
 1. txid(reveal_tx_hex) == anchor.reveal_txid                       (§4.2 txid binding)
-   AND OP_RETURN(reveal_tx_hex) == op_return_payload_hex           (raw-tx self-consistency)
+   AND anchor output(reveal_tx_hex) == op_return_payload_hex           (raw-tx self-consistency)
 
 2. decoded = decode_op_return(op_return_payload_hex)               (BC30 → merkle_root slot, b[22:54])
 
@@ -263,18 +263,18 @@ present:
 PDF bytes ─(recover from witness)→ body
 sha256(body) == record.leaf_bytes               (step 4 — witness → leaf)
 H_leaf(record.leaf_bytes) == merkle.root        (step 3 — leaf → root, single-leaf fold)
-merkle.root == decoded.merkle_root (OP_RETURN)  (step 3 — root → on-chain)
-OP_RETURN ⊂ txid-committed (non-witness) bytes  (step 1 — on-chain → Bitcoin)
+merkle.root == decoded.merkle_root (anchor output)  (step 3 — root → on-chain)
+anchor output ⊂ txid-committed (non-witness) bytes  (step 1 — on-chain → Bitcoin)
 ```
 
-Every link is to a **txid-committed** value (OP_RETURN is in the non-witness
+Every link is to a **txid-committed** value (anchor output is in the non-witness
 serialization; the witness is malleable). A tampered witness body fails step 4
 while leaving the txid intact; a forged Merkle proof fails step 3; a swapped tx
 fails step 1. The verifier MUST NOT accept `witness_envelope.leaf_sha256` (or any
 self-declared field) as the expected hash — that would be circular.
 
-> **Why not reuse the legacy "OP_RETURN == leaf_bytes" check in unified mode?**
-> In the unified tx `OP_RETURN = BC30(merkle_root) ≠ leaf_bytes`. The leaf binding
+> **Why not reuse the legacy "anchor output == leaf_bytes" check in unified mode?**
+> In the unified tx `anchor output = BC30(merkle_root) ≠ leaf_bytes`. The leaf binding
 > is reached *through the Merkle proof* (single-leaf: `merkle_root =
 > H_leaf(leaf_bytes)`), so it is still fully txid-committed — just one hop longer.
 
@@ -293,7 +293,7 @@ the §3 Merkle section with the §4.4 `witness_envelope`. The deltas vs. the leg
 | `record.leaf_bytes` | `sha256(PDF)` | `sha256(PDF)` (unchanged — still the doc digest) |
 | **`merkle`** | **absent** | **REQUIRED** — `leaf_index:0, siblings:[], directions:[], root = H_leaf(leaf_bytes)` |
 | `anchor.reveal_txid` | the witness reveal txid | the **unified** reveal txid (= the standard anchor txid; there is only one) |
-| `anchor.reveal_tx_hex` | witness-carrying reveal | the **same** unified reveal (carries witness **and** BC30 OP_RETURN) |
+| `anchor.reveal_tx_hex` | witness-carrying reveal | the **same** unified reveal (carries witness **and** BC30 anchor output) |
 | **`anchor.op_return_payload_hex`** | raw 32 B = `leaf_bytes` | **`BC30(merkle_root)` — 172 hex / 86 B** |
 | `anchor.witness_envelope` | `{input_index, content_type, protocol_tag}` | same (presence selects the witness path) |
 
@@ -324,7 +324,7 @@ Example unified `anchor` (abbreviated):
 },
 "anchor": {
   "reveal_txid": "<unified reveal txid>",
-  "reveal_tx_hex": "0200…",                       // witness carries PDF; OP_RETURN = BC30
+  "reveal_tx_hex": "0200…",                       // witness carries PDF; anchor output = BC30
   "op_return_payload_hex": "424333301e01…",       // BC30(merkle_root), 86 bytes
   "witness_envelope": { "input_index": 0, "content_type": "application/pdf", "protocol_tag": "bcrt" }
 }
@@ -376,7 +376,7 @@ op_return_payload_hex (BC30, 86 B) =
 
   = 424333301e010192a3b4c5d6e7f80192a3b4c5d6e7f87f19eb1cdb45026b630ba0b21deee4326e5220e5f67e9b7e675b6b5d0791e8230000000000000000000000000000000000000000000000000000000000000000
 
-op_return scriptPubKey (output[0]) = 6a 4c 56 <86 payload bytes>      // OP_RETURN OP_PUSHDATA1 86
+op_return scriptPubKey (output[0]) = 6a 4c 56 <86 payload bytes>      // anchor output OP_PUSHDATA1 86
 ```
 
 Verifier round-trip assertions this vector must satisfy:
@@ -396,14 +396,14 @@ Cross-check constant (independent of the PDF):
 
 ## 7. Reference touch-points for the W2/W3 agents
 
-- **OP_RETURN encoder / 86-byte layout:**
+- **anchor output encoder / 86-byte layout:**
   `services/anchoring/src/bitcoin/op_return_placeholder.rs` (BC01) +
   `anchoring_engine::OpReturnV30Payload::encode` (BC30, patent encoder);
   byte assertions in `bitcoin_tx.rs::bc30_encoder_produces_86_byte_op_return`.
 - **Witness envelope (PDF-in-witness):** `crates/witness-envelope/src/{lib,script,sign}.rs`
   (`leaf_sha256`, `Inscription`, untwawked script-path sig).
-- **W2 OP_RETURN change site:** `services/inscription/src/witness/executor.rs`
-  (replace `ScriptBuf::new_op_return(req.payload_hash)` → `OP_RETURN(BC30(merkle_root))`).
+- **W2 anchor output change site:** `services/inscription/src/witness/executor.rs`
+  (replace `ScriptBuf::new_op_return(req.payload_hash)` → `anchor output(BC30(merkle_root))`).
 - **Bundle assembler (producer):** `services/verification/src/domain/bundle.rs`
   (`AnchorBundleSection`, `MerkleProofSection`, `build_attestation_bundle`).
 - **Verifier (consumers, dual-mode):** `verify-cli/verify.py`
@@ -415,4 +415,4 @@ Cross-check constant (independent of the PDF):
 - **Single-leaf root law:** `ann-core/crates/merkle-batching/src/lib.rs` (root =
   H_leaf(leaf) for one leaf) + `proof_view.rs::single_leaf_tree_has_empty_proof_and_verifies`.
 - **General wire contract:** `docs/bundle-schema.md` §3 (merkle), §4.1
-  (OP_RETURN), §4.2 (txid binding), §4.4 (witness_envelope).
+  (anchor output), §4.2 (txid binding), §4.4 (witness_envelope).

@@ -47,13 +47,13 @@ def bc30(merkle_root, batch_id, flags=0x00):
     assert len(p) == 86
     return p
 
-def build_reveal_tx(op_return_payload):
-    """Structurally-valid segwit reveal tx carrying the OP_RETURN. Not a real
+def build_reveal_tx(anchor_payload):
+    """Structurally-valid segwit reveal tx carrying the anchor output. Not a real
     signed tx — the verifier only needs it to parse and hash to its txid."""
     version = bytes.fromhex("02000000")
     prevout = bytes(32) + bytes.fromhex("00000000")
     vin = b"\x01" + prevout + b"\x00" + bytes.fromhex("fdffffff")
-    op_script = b"\x6a\x4c" + bytes([len(op_return_payload)]) + op_return_payload
+    op_script = b"\x6a\x4c" + bytes([len(anchor_payload)]) + anchor_payload
     out0 = bytes(8) + V._enc_varint(len(op_script)) + op_script
     p2tr = b"\x51\x20" + bytes([0x11] * 32)
     out1 = (9000).to_bytes(8, "little") + V._enc_varint(len(p2tr)) + p2tr
@@ -63,7 +63,7 @@ def build_reveal_tx(op_return_payload):
 
 # ---------------- §6 unified witness inscription builders (UNIFIED-WITNESS-CONTRACT) ----------------
 # A unified reveal carries BOTH the BIP-342 tapscript envelope (the PDF in the
-# witness) AND a BC30(merkle_root) OP_RETURN. The witness is malleable (NOT
+# witness) AND a BC30(merkle_root) anchor output. The witness is malleable (NOT
 # txid-committed), so the recovered body is bound to record.leaf_bytes through
 # the single-leaf Merkle proof. These mirror crates/witness-envelope/src/{script,
 # lib}.rs (envelope framing) but use a deterministic fake key — the verifier
@@ -93,18 +93,18 @@ def build_inscription_script(body, tag=b"bcrt", content_type=b"application/pdf",
     s += b"\x68"                                  # OP_ENDIF
     return s
 
-def build_witness_reveal_tx(op_return_payload, inscription_script,
+def build_witness_reveal_tx(anchor_payload, inscription_script,
                             internal_xonly=INSC_INTERNAL_KEY):
     """A unified reveal tx: script-path P2TR spend whose witness is
     [sig(64), inscription_script, control_block(33)] and whose output[0] is
-    OP_RETURN(op_return_payload). Structurally valid for the verifier (parses +
+    anchor output(anchor_payload). Structurally valid for the verifier (parses +
     hashes to a stable txid); the schnorr sig is a deterministic placeholder
     because the witness is not txid-committed (§4)."""
     version = bytes.fromhex("02000000")
     prevout = bytes(32) + bytes.fromhex("00000000")
     vin = b"\x01" + prevout + b"\x00" + bytes.fromhex("fdffffff")   # sequence 0xfffffffd (RBF)
-    op_script = b"\x6a\x4c" + bytes([len(op_return_payload)]) + op_return_payload
-    out0 = bytes(8) + V._enc_varint(len(op_script)) + op_script     # value 0 + OP_RETURN
+    op_script = b"\x6a\x4c" + bytes([len(anchor_payload)]) + anchor_payload
+    out0 = bytes(8) + V._enc_varint(len(op_script)) + op_script     # value 0 + anchor output
     p2tr = b"\x51\x20" + bytes([0x11] * 32)                          # OP_1 <32B> P2TR change
     out1 = (9000).to_bytes(8, "little") + V._enc_varint(len(p2tr)) + p2tr
     vout = b"\x02" + out0 + out1
@@ -122,7 +122,7 @@ def single_leaf_merkle(leaf_bytes):
 
 def assemble_unified_witness_bundle(pdf_bytes, content_type=b"application/pdf", tag=b"bcrt"):
     """Build a §5 unified witness bundle: the PDF lives in the reveal witness and
-    output[0] is OP_RETURN = BC30(merkle_root) with flags=WITNESS_PRESENT. The
+    output[0] is anchor output = BC30(merkle_root) with flags=WITNESS_PRESENT. The
     bundle carries the REQUIRED single-leaf Merkle section so the verifier binds
     the recovered witness body → leaf_bytes → merkle_root → on-chain (§4)."""
     leaf = V.sha256(pdf_bytes)                          # leaf_bytes = sha256(PDF) = sha256(witness body)
@@ -142,7 +142,7 @@ def assemble_unified_witness_bundle(pdf_bytes, content_type=b"application/pdf", 
             "preimage": {"scheme": "sha256-file",
                          "content_type": content_type.decode("latin1")},
             "descriptor": {"note": "UNIFIED-WITNESS-CONTRACT KAT — PDF in the reveal "
-                                   "witness + BC30(merkle_root) OP_RETURN (one tx, one anchor)"},
+                                   "witness + BC30(merkle_root) anchor output (one tx, one anchor)"},
         },
         "merkle": merkle,
         "anchor": {
@@ -158,7 +158,7 @@ def assemble_unified_witness_bundle(pdf_bytes, content_type=b"application/pdf", 
 
 def tamper_witness_body(bundle, pdf_bytes, content_type=b"application/pdf", tag=b"bcrt"):
     """Return a copy of a unified bundle whose witness body is flipped by one bit.
-    The OP_RETURN/merkle_root and the txid are UNCHANGED (the witness is malleable
+    The anchor output/merkle_root and the txid are UNCHANGED (the witness is malleable
     / not txid-committed, §4), so steps 1–2 still pass but step 3 (sha256(body) ==
     leaf_bytes) FAILS — the headline tamper-evidence of a witness inscription."""
     bad = bytearray(pdf_bytes); bad[-2] ^= 0x01        # flip one bit of the body
@@ -214,7 +214,7 @@ def prior_daily_entry(exchange_id, seq, business_date, body_hash, prev_entry_has
     return e
 
 def assemble_daily_v2_bundle(exchange_id, business_date, recon_assets, recon_ok):
-    """A v2 daily bundle: the OP_RETURN + chain body_hash carry `day_root`
+    """A v2 daily bundle: the anchor output + chain body_hash carry `day_root`
     (binds the customer-balance root AND the (a)/(b)/(c) reconciliation), and a
     `reconciliation` section ships the §6 inputs the verifier folds back in."""
     others = [bytes([b]) * 32 for b in (0xB1, 0xC2, 0xD3)]
@@ -222,7 +222,7 @@ def assemble_daily_v2_bundle(exchange_id, business_date, recon_assets, recon_ok)
     rc = V.recon_commitment(exchange_id, business_date, recon_ok, recon_assets)
     dr = V.day_root(exchange_id, business_date, balances_root.hex(), rc)  # the anchored value
     batch_id = bytes.fromhex("0192a3b4c5d6e7f80192a3b4c5d6e7f8")
-    payload = bc30(dr, batch_id)                      # OP_RETURN inscribes day_root, not the bare root
+    payload = bc30(dr, batch_id)                      # anchor output inscribes day_root, not the bare root
     raw_tx = build_reveal_tx(payload)
     txid, _ = V.txid_from_raw(raw_tx)
     e = {"exchange_id": exchange_id, "seq": 1, "kind": "daily",
@@ -424,22 +424,22 @@ def main():
     w(os.path.join(EX, "06-daily-day-root", "expected.txt"), "VERIFIED (exit 0)\n")
     w(os.path.join(EX, "06-daily-day-root", "README.md"),
       "# 06 · Daily day_root (v2 — the anchor commits the trust reconciliation)\n\n"
-      "A **v2** daily bundle. The OP_RETURN no longer carries the bare customer-balance "
+      "A **v2** daily bundle. The anchor output no longer carries the bare customer-balance "
       "Merkle root — it carries `day_root`:\n\n```\n"
       "recon_commitment = SHA256(\"attest:daily:recon\\n\"  || JCS{assets_hash, business_date, exchange_id, reconciliation_ok})\n"
       "day_root         = SHA256(\"attest:daily:anchor\\n\" || JCS{balances_root, business_date, exchange_id, recon_commitment})\n```\n\n"
       "So one Bitcoin anchor attests BOTH the customer liabilities (the Merkle root) "
       "AND the (a)/(b)/(c) trust reconciliation. The verifier recomputes `day_root` from "
-      "the `reconciliation` section + the Merkle root and asserts it equals the OP_RETURN "
+      "the `reconciliation` section + the Merkle root and asserts it equals the anchor output "
       "(§4) and the chain `body_hash` (§5).\n\n```bash\n"
       "python3 ../../verify-cli/verify.py bundle.json --account %s --salt %s\n```\n\n"
       "Expected: every check ✓ → **VERIFIED**, with step 6 listing the per-asset "
       "(a)/(b)/(c). NOTE: the (a) reserve side is exchange-supplied, not independently "
-      "measured. Flip any residual and step 2 (OP_RETURN ≠ recomputed day_root) FAILS.\n"
+      "measured. Flip any residual and step 2 (anchor output ≠ recomputed day_root) FAILS.\n"
       % (ACCOUNT, SALT_HEX))
 
-    # ---- examples/07 — unified witness inscription (PDF in witness + BC30 OP_RETURN) ----
-    # One reveal tx that is simultaneously the standard anchor (OP_RETURN =
+    # ---- examples/07 — unified witness inscription (PDF in witness + BC30 anchor output) ----
+    # One reveal tx that is simultaneously the standard anchor (anchor output =
     # BC30(merkle_root)) AND the witness carrier (the PDF inscribed in a BIP-342
     # tapscript envelope). The recovered witness body binds to leaf_bytes, which
     # binds to merkle_root via the single-leaf proof, which is the on-chain root.
@@ -450,22 +450,22 @@ def main():
     w(os.path.join(EX, "07-witness-unified", "original.pdf"), UNIFIED_PDF)
     w(os.path.join(EX, "07-witness-unified", "expected.txt"), "VERIFIED (exit 0)\n")
     w(os.path.join(EX, "07-witness-unified", "README.md"),
-      "# 07 · Unified witness inscription (PDF in the witness + `BC30(merkle_root)` OP_RETURN)\n\n"
+      "# 07 · Unified witness inscription (PDF in the witness + `BC30(merkle_root)` anchor output)\n\n"
       "One Bitcoin reveal transaction that is **both** the standard Merkle anchor "
       "**and** the witness carrier — replacing the old two-tx (anchor + inscription) "
       "flow for single-mode audit anchors. See `docs/UNIFIED-WITNESS-CONTRACT.md`.\n\n"
-      "- `output[0]` = `OP_RETURN(BC30(merkle_root))` — **not** `leaf_bytes` (the whole change).\n"
+      "- `output[0]` = `anchor output(BC30(merkle_root))` — **not** `leaf_bytes` (the whole change).\n"
       "- `witness[1]` = the BIP-342 tapscript envelope carrying the audit PDF.\n"
       "- `merkle` = a single-leaf section (`leaf_index 0`, `siblings []`, "
       "`root = H_leaf(leaf_bytes)`).\n\n"
       "The verifier recovers the PDF straight from the witness and binds it through the "
-      "chain `body → leaf_bytes → merkle_root → OP_RETURN → txid`:\n\n```bash\n"
+      "chain `body → leaf_bytes → merkle_root → anchor output → txid`:\n\n```bash\n"
       "python3 ../../verify-cli/verify.py bundle.json\n```\n\n"
       "Expected: every check ✓ → **VERIFIED** (no off-bundle file needed — the document "
       "IS on Bitcoin). `original.pdf` ships only so you can re-hash the 62 KAT bytes "
       "yourself: `sha256(original.pdf) == record.leaf_bytes`.\n\n"
       "Because the witness is **malleable** (not committed to the txid), a tampered "
-      "witness body leaves the txid and OP_RETURN intact (steps 1–2 still pass) but "
+      "witness body leaves the txid and anchor output intact (steps 1–2 still pass) but "
       "fails step 3 (`sha256(body) ≠ leaf_bytes`) — see "
       "`../08-tampered-witness/` and `fixtures/07-witness-unified.tampered.json`.\n")
 
@@ -477,7 +477,7 @@ def main():
       "# 08 · Tampered unified witness body is caught (step 3)\n\n"
       "Same unified bundle as example 07, but one bit of the **witness body** (the "
       "inscribed PDF) was flipped. The witness is NOT committed to the txid, so the "
-      "`reveal_txid` and the `BC30(merkle_root)` OP_RETURN are unchanged — steps 1 "
+      "`reveal_txid` and the `BC30(merkle_root)` anchor output are unchanged — steps 1 "
       "(txid binding) and 2 (record binds to the on-chain merkle_root) still pass. "
       "But the recovered body no longer hashes to `record.leaf_bytes`, so step 3 "
       "FAILS.\n\n```bash\n"
@@ -514,7 +514,7 @@ echo "== 05 daily-chain-walkback (§5 continuity via chain.links) =="
 check "05 chain walk-back"    0 $CLI 05-daily-chain-walkback/bundle.json --account alice@demoex --salt %s
 echo "== 06 daily day_root (v2: anchor commits the reconciliation) =="
 check "06 day_root v2"        0 $CLI 06-daily-day-root/bundle.json --account alice@demoex --salt %s
-echo "== 07 witness-unified (PDF in witness + BC30 OP_RETURN, merkle-bind) =="
+echo "== 07 witness-unified (PDF in witness + BC30 anchor output, merkle-bind) =="
 check "07 witness unified"    0 $CLI 07-witness-unified/bundle.json
 echo "== 08 tampered-witness (malleable body must be caught at step 3) =="
 check "08 tampered witness"   1 $CLI 08-tampered-witness/bundle.json
@@ -533,13 +533,13 @@ echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"
     tampered_chain = json.loads(jdump(b02)); tampered_chain["chain"]["entry"]["payload_hash"] = "ff" * 32
     w(os.path.join(HERE, "sample-bundle.tampered-chain.json"), jdump(tampered_chain))
     # v2 day_root fixtures (CI cross-check).
-    w(os.path.join(HERE, "sample-bundle.daily-v2.valid.json"), jdump(b06))     # OP_RETURN == day_root
-    # tampered reconciliation: bump a residual → recomputed day_root ≠ OP_RETURN → §4.1 FAILS.
+    w(os.path.join(HERE, "sample-bundle.daily-v2.valid.json"), jdump(b06))     # anchor output == day_root
+    # tampered reconciliation: bump a residual → recomputed day_root ≠ anchor output → §4.1 FAILS.
     tampered_recon = json.loads(jdump(b06)); tampered_recon["reconciliation"]["assets"][0]["residual"] = "999"
     w(os.path.join(HERE, "sample-bundle.tampered-recon.json"), jdump(tampered_recon))
     # unified witness fixtures (UNIFIED-WITNESS-CONTRACT §6 KAT). 07 = the pinned
-    # unified bundle (PDF in witness, OP_RETURN = BC30(merkle_root), single-leaf
-    # merkle). Its tampered twin flips one witness-body bit: txid + OP_RETURN are
+    # unified bundle (PDF in witness, anchor output = BC30(merkle_root), single-leaf
+    # merkle). Its tampered twin flips one witness-body bit: txid + anchor output are
     # unchanged (witness is malleable), so step 3 (sha256(body) == leaf_bytes) FAILS.
     w(os.path.join(HERE, "07-witness-unified.json"), jdump(b07))
     w(os.path.join(HERE, "07-witness-unified.tampered.json"), jdump(b08))
