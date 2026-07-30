@@ -52,6 +52,13 @@
   .verdict.ok  { display:block; background:rgba(63,185,80,.12);  border:1px solid var(--ok);  color:var(--ok); }
   .verdict.bad { display:block; background:rgba(248,81,73,.12);  border:1px solid var(--bad); color:var(--bad); }
   .verdict small { display:block; font-weight:400; color:var(--muted); margin-top:4px; }
+  .prog { display:none; margin:0 0 18px; padding:14px 16px; border:1px solid var(--line);
+    border-radius:10px; background:var(--panel); }
+  .prog.on { display:block; }
+  .prog .lbl { font:12px var(--mono); color:var(--muted); margin-bottom:8px; }
+  .prog .bar { height:6px; border-radius:999px; background:var(--line); overflow:hidden; }
+  .prog .bar i { display:block; height:100%; width:0; background:var(--accent);
+    transition:width .15s linear; }
   .step { border:1px solid var(--line); border-radius:10px; padding:14px 16px;
     margin-bottom:10px; background:var(--panel2); }
   .step .top { display:flex; align-items:center; gap:10px; }
@@ -82,6 +89,7 @@
   </header>
 
   <div id="verdict" class="verdict"></div>
+  <div id="prog" class="prog"><div class="lbl" id="progLbl">…</div><div class="bar"><i id="progBar"></i></div></div>
 
   <div class="card">
     <label class="h" for="bundle">1 · Proof bundle (JSON)</label>
@@ -239,6 +247,34 @@ function zkMsm(points, scalars) {
     acc = zkJadd(acc, zkJmul(zkToJ(points[i]), scalars[i]));
   }
   return zkToAffine(acc);
+}
+/**
+ * k1·P + k2·Q in ONE double-and-add pass (Shamir's trick). The IPA fold does
+ * exactly this shape for every basis element in every round — computing the
+ * two products separately doubles the work for no reason.
+ */
+function zkJmul2(P, k1, Q, k2) {
+  k1 = zkMod(k1, ZK_N); k2 = zkMod(k2, ZK_N);
+  if (k1 === 0n) return zkJmul(Q, k2);
+  if (k2 === 0n) return zkJmul(P, k1);
+  const PQ = zkJadd(P, Q);
+  const bits = Math.max(k1.toString(2).length, k2.toString(2).length);
+  let acc = zkJinf();
+  for (let i = bits - 1; i >= 0; i--) {
+    acc = zkJdouble(acc);
+    const b = (((k1 >> BigInt(i)) & 1n) << 1n) | ((k2 >> BigInt(i)) & 1n);
+    if (b === 3n) acc = zkJadd(acc, PQ);
+    else if (b === 2n) acc = zkJadd(acc, P);
+    else if (b === 1n) acc = zkJadd(acc, Q);
+  }
+  return acc;
+}
+
+/** Σ scalars[i]·pointsJ[i] with everything staying Jacobian. */
+function zkMsmJ(pointsJ, scalars) {
+  let acc = zkJinf();
+  for (let i = 0; i < pointsJ.length; i++) acc = zkJadd(acc, zkJmul(pointsJ[i], scalars[i]));
+  return acc;
 }
 /** Σ points[i] — every scalar equal, so multiply the sum once, not each term. */
 function zkSumPoints(points) { let acc = zkJinf(); for (const p of points) if (p !== null) acc = zkJadd(acc, zkToJ(p)); return zkToAffine(acc); }
@@ -401,8 +437,17 @@ const ZK_MAX_N = 4096;
  * `expected` is what the CALLER independently knows (bundle §8.2). Returns a
  * structured result; throws only on malformed input.
  */
-async function verifyZk(bundleZk, expected) {
+async function verifyZk(bundleZk, expected, onProgress) {
   const notes = [];
+  // Verification is seconds of straight-line BigInt work. Without yielding the
+  // browser cannot repaint and the page looks hung, so every phase reports and
+  // then hands the event loop back. The yield costs a millisecond; the
+  // alternative is a user who thinks the tool is broken.
+  const step = async (label, frac) => {
+    if (!onProgress) return;
+    onProgress(label, frac);
+    await new Promise((r) => setTimeout(r, 0));
+  };
   if (typeof bundleZk.spec !== "string" || !bundleZk.spec.startsWith("zk-transparent-statements-spec/v2."))
     throw new Error("unsupported zk spec version: " + bundleZk.spec);
 
@@ -477,6 +522,7 @@ async function verifyZk(bundleZk, expected) {
   if (statement === "committed-sum-range") sumPok = { R: rd.point(), Z: rd.scalar() };
   rd.end();
 
+  await step("generators (" + nm + " points)", 0.05);
   const gens = await zkGenerators(nm);
   const baseH = gens.baseH;
 
@@ -491,6 +537,7 @@ async function verifyZk(bundleZk, expected) {
     padded[n] = direction === "ge" ? zkAdd(sum, zkNeg(sg)) : zkAdd(sg, zkNeg(sum));
   }
 
+  await step("transcript", 0.2);
   const ids = zkBpChallengeIds(rounds);
   const chals = {};
   // Attach the challenge stream to any failure. "Does not verify" is one bit;
@@ -531,6 +578,7 @@ async function verifyZk(bundleZk, expected) {
     let zj = z2 * z % ZK_N;
     for (let j = 0; j < m; j++) { delta = zkMod(delta - zj * full64, ZK_N); zj = zj * z % ZK_N; } }
 
+  await step("main equation", 0.25);
   // Check (65): t̂·g + τx·h == δ·g + Σ_j z^{2+j}·V_j + x·T1 + x²·T2
   { const lhs = zkAdd(zkMul(ZK_G, tHat), zkMul(baseH, tauX));
     let rhs = zkMul(ZK_G, delta);
@@ -541,38 +589,45 @@ async function verifyZk(bundleZk, expected) {
     if (!zkPtEq(lhs, rhs)) bail("bulletproofs main equation failed"); }
 
   // P_ipa = A + x·S − μ·h − z·ΣG_i + Σ(z·yⁱ + d_i)·H'_i , with H'_i = y^{-i}·H_i
+  await step("H' basis", 0.3);
   const yInv = zkInvN(y);
-  const hPrime = new Array(nm);
-  { let acc = 1n; for (let i = 0; i < nm; i++) { hPrime[i] = zkMul(gens.h[i], acc); acc = acc * yInv % ZK_N; } }
-  let P = zkAdd(A, zkMul(S, x));
-  P = zkAdd(P, zkMul(baseH, zkMod(-mu, ZK_N)));
+  // Jacobian from here to the end: an affine round trip costs a modular
+  // inverse, and this section performs thousands of operations.
+  const hPrimeJ = new Array(nm);
+  { let acc = 1n; for (let i = 0; i < nm; i++) { hPrimeJ[i] = zkJmul(zkToJ(gens.h[i]), acc); acc = acc * yInv % ZK_N; } }
+
+  await step("P commitment", 0.45);
+  let PJ = zkJadd(zkToJ(A), zkJmul(zkToJ(S), x));
+  PJ = zkJadd(PJ, zkJmul(zkToJ(baseH), zkMod(-mu, ZK_N)));
   { // every G_i carries the same weight −z, so sum first and multiply once
     const negZ = zkMod(-z, ZK_N);
-    P = zkAdd(P, zkMul(zkSumPoints(gens.g), negZ));
+    PJ = zkJadd(PJ, zkJmul(zkToJ(zkSumPoints(gens.g)), negZ));
     const coeff = new Array(nm);
     for (let i = 0; i < nm; i++) coeff[i] = (z * yPow[i] + dVec[i]) % ZK_N;
-    P = zkAdd(P, zkMsm(hPrime, coeff)); }
+    PJ = zkJadd(PJ, zkMsmJ(hPrimeJ, coeff)); }
 
   // Fold: P* = P + t̂·Q + Σ(u_k²·L_k + u_k^{-2}·R_k), bases folded in step.
-  let Pstar = zkAdd(P, zkMul(Q, tHat));
-  let gCur = gens.g.slice(), hCur = hPrime.slice();
+  let Pstar = zkJadd(PJ, zkJmul(zkToJ(Q), tHat));
+  let gCur = gens.g.map(zkToJ), hCur = hPrimeJ;
   for (let k = 0; k < rounds; k++) {
+    await step("inner-product round " + (k + 1) + "/" + rounds, 0.5 + 0.45 * (k / rounds));
     const label = "bp-ipa:" + k;
     t.add(label, zkSec1Encode(L[k])); t.add(label, zkSec1Encode(R[k]));
     const uk = chals[label] = await t.challenge(label);
     if (uk === 0n) bail("zero IPA challenge");
     const ukInv = zkInvN(uk);
-    Pstar = zkAdd(Pstar, zkMul(L[k], uk * uk % ZK_N));
-    Pstar = zkAdd(Pstar, zkMul(R[k], ukInv * ukInv % ZK_N));
+    Pstar = zkJadd(Pstar, zkJmul(zkToJ(L[k]), uk * uk % ZK_N));
+    Pstar = zkJadd(Pstar, zkJmul(zkToJ(R[k]), ukInv * ukInv % ZK_N));
     const half = gCur.length / 2, ng = new Array(half), nh = new Array(half);
     for (let i = 0; i < half; i++) {
-      ng[i] = zkAdd(zkMul(gCur[i], ukInv), zkMul(gCur[half + i], uk));
-      nh[i] = zkAdd(zkMul(hCur[i], uk), zkMul(hCur[half + i], ukInv));
+      ng[i] = zkJmul2(gCur[i], ukInv, gCur[half + i], uk);
+      nh[i] = zkJmul2(hCur[i], uk, hCur[half + i], ukInv);
     }
     gCur = ng; hCur = nh;
   }
-  { const rhs = zkAdd(zkAdd(zkMul(gCur[0], a), zkMul(hCur[0], b)), zkMul(Q, a * b % ZK_N));
-    if (!zkPtEq(Pstar, rhs)) bail("inner-product argument failed"); }
+  await step("final check", 0.95);
+  { const rhs = zkJadd(zkJadd(zkJmul(gCur[0], a), zkJmul(hCur[0], b)), zkJmul(zkToJ(Q), a * b % ZK_N));
+    if (!zkPtEq(zkToAffine(Pstar), zkToAffine(rhs))) bail("inner-product argument failed"); }
 
   // committed-sum-range additionally proves ΣC − T·g opens to 0 on h.
   if (statement === "committed-sum-range") {
@@ -584,6 +639,7 @@ async function verifyZk(bundleZk, expected) {
       bail("sum proof failed");
   }
 
+  await step("done", 1);
   return {
     ok: true, variant, statement, n,
     total: total === null ? null : total.toString(),
@@ -922,7 +978,18 @@ function verdict(ok, msg, sub){
   v.innerHTML=(ok?"✓ ":"✕ ")+msg+(sub?'<small>'+sub+'</small>':"");
 }
 function reset(){ stepsEl.innerHTML=""; $("verdict").className="verdict";
-  $("onchainCard").style.display="none"; }
+  $("onchainCard").style.display="none"; progress(null); }
+
+/* ---------- progress ----------
+ * A zk verification is seconds of BigInt arithmetic. Without this the page
+ * simply stops responding and the honest reading is "it is broken". */
+function progress(label, frac){
+  const box=$("prog");
+  if(label===null){ box.classList.remove("on"); return; }
+  box.classList.add("on");
+  $("progLbl").textContent=label;
+  $("progBar").style.width=Math.round((frac||0)*100)+"%";
+}
 
 /* ---------- bundle §8: zero-knowledge statement ---------- */
 async function verifyZkSection(z){
@@ -930,19 +997,29 @@ async function verifyZkSection(z){
     // §8.2 — the caller's own values decide. A browser visitor has no separate
     // records, so the bundle's own context is used and that limitation is
     // stated plainly rather than hidden behind a green tick.
-    const res = await verifyZk(z, { context: z.context, public_inputs: z.public_inputs });
+    const res = await verifyZk(z, { context: z.context, public_inputs: z.public_inputs },
+      (label, frac) => progress("verifying zero-knowledge proof — " + label, frac));
+    progress(null);
     const pi = z.public_inputs || {};
     const claim = res.statement === "committed-sum-cmp"
       ? "sum of "+res.n+" hidden values "+(res.direction==="ge"?"≥":"≤")+" "+res.threshold
       : "sum of "+res.n+" hidden values = "+res.total;
     renderStep("ok","ZK statement verified — "+claim,
       res.statement+" · "+res.variant+" · run "+(z.context&&z.context.run_ref||"?"));
-    renderStep("warn","Public inputs came from the bundle itself",
-      "This page has no independent record to compare against. An auditor MUST check "
-      +"org_id/run_ref"+(pi.threshold!==undefined?"/threshold/direction":"/total")
-      +" against their own books — otherwise the prover chose what it proved.");
+    const what = pi.threshold!==undefined
+      ? "threshold <b>"+pi.threshold+"</b> ("+(pi.direction==="ge"?"at least":"at most")+")"
+      : "total <b>"+pi.total+"</b>";
+    renderStep("warn","The maths is proven. Check that it is the RIGHT claim.",
+      "The proof is valid — but it proves a claim about run <b>"
+      +((z.context&&z.context.run_ref)||"?")+"</b> of org <b>"
+      +((z.context&&z.context.org_id)||"?")+"</b>, with "+what+"."
+      +" Those values came from this file, and this page has no way to know what you "
+      +"were promised. Compare them against your own records: if the issuer owed you "
+      +"a statement about a different period, or a larger threshold, a perfectly valid "
+      +"proof of a smaller claim would still show up green here.");
     return true;
   }catch(err){
+    progress(null);
     renderStep("bad","ZK statement did NOT verify", String(err && err.message || err));
     return false;
   }
@@ -1139,7 +1216,13 @@ async function checkOnChain(){
 const SAMPLE={"schema": "bitcert-proof-bundle/v2", "bitcoin_network": "regtest", "generated_at": "2026-05-29T09:00:00Z", "record": {"kind": "daily", "leaf_bytes": "648b0571d9ca1715258adbdaf020111bb486ae164edb6472e8f22408b5f91e05", "preimage": {"scheme": "sha256-jcs-fields", "domain": "attest:daily:leaf\n", "fields": {"asset": "BTC", "balance_minor": "150000000", "user_commitment": "fdd2290fb1bc5ab7c6932b17e478c38b1b4f39acee5ba391a7e691b118c055a4"}, "commitment": {"scheme": "sha256-salt-account", "account_field": "account_id"}}, "descriptor": {"exchange_id": "demoex", "business_date": "2026-05-28"}}, "merkle": {"leaf_index": 0, "root": "d06b635ed3f5665083b6f1b4fb7137fd691ad59725ed109cf4744ba7dc41d085", "siblings": ["aa968f99cf907d0981efbc226c01f268aae3fa318d4da0b8f3a869409ac11f11", "292216d8f9a369f521123ee787b0c13b825d984c09752c22e892a75d2caca214"], "directions": ["right", "right"]}, "anchor": {"reveal_txid": "9c6d87bf24ad431e79a05cb372dd21003d3392ee246f4f101bc147b1e666b80f", "commit_txid": "0000000000000000000000000000000000000000000000000000000000000000", "reveal_tx_hex": "0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000fdffffff020000000000000000596a4c56424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d500000000000000000000000000000000000000000000000000000000000000002823000000000000225120111111111111111111111111111111111111111111111111111111111111111101400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "op_return_payload_hex": "424333301e000192a3b4c5d6e7f80192a3b4c5d6e7f8c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d50000000000000000000000000000000000000000000000000000000000000000", "confirmed": {"block_height": 142, "block_hash": "0000000000000000000000000000000000000000000000000000000000000000", "confirmations": 6}}, "chain": {"entry": {"exchange_id": "demoex", "seq": 1, "kind": "daily", "prev_entry_hash": "0000000000000000000000000000000000000000000000000000000000000000", "body_hash": "c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d5", "business_date": "2026-05-28", "payload_hash": "b21038a4e2868ca64375b653bb7075e54301a5869823d45149539a5e0dc38b65"}}, "reconciliation": {"scheme": "day-root/v1", "reconciliation_ok": true, "assets": [{"asset": "BTC", "scale": 8, "trust_required": "150000000", "trust_actual": "165000000", "residual": "15000000", "ok": true}, {"asset": "ETH", "scale": 18, "trust_required": "5000000000000000000", "trust_actual": "5500000000000000000", "residual": "500000000000000000", "ok": true}], "day_root": "c6eb5319f860addc768f00219b74e6f83e370689ab7f0360eeaf34559cc291d5"}};
 
 window.addEventListener("DOMContentLoaded",function(){
-  $("verify").onclick=verify;
+  // Disable while running: a zk verification takes seconds, and a second
+  // click would start a parallel run that fights the first for the progress bar.
+  $("verify").onclick=async function(){
+    const btn=$("verify"), was=btn.textContent;
+    btn.disabled=true; btn.textContent="Verifying…";
+    try { await verify(); } finally { btn.disabled=false; btn.textContent=was; progress(null); }
+  };
   $("clear").onclick=function(){ $("bundle").value=""; reset(); };
   $("sample").onclick=function(){ $("bundle").value=JSON.stringify(SAMPLE,null,2); reset(); };
   $("checkchain").onclick=checkOnChain;

@@ -85,6 +85,34 @@ function zkMsm(points, scalars) {
   }
   return zkToAffine(acc);
 }
+/**
+ * k1·P + k2·Q in ONE double-and-add pass (Shamir's trick). The IPA fold does
+ * exactly this shape for every basis element in every round — computing the
+ * two products separately doubles the work for no reason.
+ */
+function zkJmul2(P, k1, Q, k2) {
+  k1 = zkMod(k1, ZK_N); k2 = zkMod(k2, ZK_N);
+  if (k1 === 0n) return zkJmul(Q, k2);
+  if (k2 === 0n) return zkJmul(P, k1);
+  const PQ = zkJadd(P, Q);
+  const bits = Math.max(k1.toString(2).length, k2.toString(2).length);
+  let acc = zkJinf();
+  for (let i = bits - 1; i >= 0; i--) {
+    acc = zkJdouble(acc);
+    const b = (((k1 >> BigInt(i)) & 1n) << 1n) | ((k2 >> BigInt(i)) & 1n);
+    if (b === 3n) acc = zkJadd(acc, PQ);
+    else if (b === 2n) acc = zkJadd(acc, P);
+    else if (b === 1n) acc = zkJadd(acc, Q);
+  }
+  return acc;
+}
+
+/** Σ scalars[i]·pointsJ[i] with everything staying Jacobian. */
+function zkMsmJ(pointsJ, scalars) {
+  let acc = zkJinf();
+  for (let i = 0; i < pointsJ.length; i++) acc = zkJadd(acc, zkJmul(pointsJ[i], scalars[i]));
+  return acc;
+}
 /** Σ points[i] — every scalar equal, so multiply the sum once, not each term. */
 function zkSumPoints(points) { let acc = zkJinf(); for (const p of points) if (p !== null) acc = zkJadd(acc, zkToJ(p)); return zkToAffine(acc); }
 
@@ -246,8 +274,17 @@ const ZK_MAX_N = 4096;
  * `expected` is what the CALLER independently knows (bundle §8.2). Returns a
  * structured result; throws only on malformed input.
  */
-async function verifyZk(bundleZk, expected) {
+async function verifyZk(bundleZk, expected, onProgress) {
   const notes = [];
+  // Verification is seconds of straight-line BigInt work. Without yielding the
+  // browser cannot repaint and the page looks hung, so every phase reports and
+  // then hands the event loop back. The yield costs a millisecond; the
+  // alternative is a user who thinks the tool is broken.
+  const step = async (label, frac) => {
+    if (!onProgress) return;
+    onProgress(label, frac);
+    await new Promise((r) => setTimeout(r, 0));
+  };
   if (typeof bundleZk.spec !== "string" || !bundleZk.spec.startsWith("zk-transparent-statements-spec/v2."))
     throw new Error("unsupported zk spec version: " + bundleZk.spec);
 
@@ -322,6 +359,7 @@ async function verifyZk(bundleZk, expected) {
   if (statement === "committed-sum-range") sumPok = { R: rd.point(), Z: rd.scalar() };
   rd.end();
 
+  await step("generators (" + nm + " points)", 0.05);
   const gens = await zkGenerators(nm);
   const baseH = gens.baseH;
 
@@ -336,6 +374,7 @@ async function verifyZk(bundleZk, expected) {
     padded[n] = direction === "ge" ? zkAdd(sum, zkNeg(sg)) : zkAdd(sg, zkNeg(sum));
   }
 
+  await step("transcript", 0.2);
   const ids = zkBpChallengeIds(rounds);
   const chals = {};
   // Attach the challenge stream to any failure. "Does not verify" is one bit;
@@ -376,6 +415,7 @@ async function verifyZk(bundleZk, expected) {
     let zj = z2 * z % ZK_N;
     for (let j = 0; j < m; j++) { delta = zkMod(delta - zj * full64, ZK_N); zj = zj * z % ZK_N; } }
 
+  await step("main equation", 0.25);
   // Check (65): t̂·g + τx·h == δ·g + Σ_j z^{2+j}·V_j + x·T1 + x²·T2
   { const lhs = zkAdd(zkMul(ZK_G, tHat), zkMul(baseH, tauX));
     let rhs = zkMul(ZK_G, delta);
@@ -386,38 +426,45 @@ async function verifyZk(bundleZk, expected) {
     if (!zkPtEq(lhs, rhs)) bail("bulletproofs main equation failed"); }
 
   // P_ipa = A + x·S − μ·h − z·ΣG_i + Σ(z·yⁱ + d_i)·H'_i , with H'_i = y^{-i}·H_i
+  await step("H' basis", 0.3);
   const yInv = zkInvN(y);
-  const hPrime = new Array(nm);
-  { let acc = 1n; for (let i = 0; i < nm; i++) { hPrime[i] = zkMul(gens.h[i], acc); acc = acc * yInv % ZK_N; } }
-  let P = zkAdd(A, zkMul(S, x));
-  P = zkAdd(P, zkMul(baseH, zkMod(-mu, ZK_N)));
+  // Jacobian from here to the end: an affine round trip costs a modular
+  // inverse, and this section performs thousands of operations.
+  const hPrimeJ = new Array(nm);
+  { let acc = 1n; for (let i = 0; i < nm; i++) { hPrimeJ[i] = zkJmul(zkToJ(gens.h[i]), acc); acc = acc * yInv % ZK_N; } }
+
+  await step("P commitment", 0.45);
+  let PJ = zkJadd(zkToJ(A), zkJmul(zkToJ(S), x));
+  PJ = zkJadd(PJ, zkJmul(zkToJ(baseH), zkMod(-mu, ZK_N)));
   { // every G_i carries the same weight −z, so sum first and multiply once
     const negZ = zkMod(-z, ZK_N);
-    P = zkAdd(P, zkMul(zkSumPoints(gens.g), negZ));
+    PJ = zkJadd(PJ, zkJmul(zkToJ(zkSumPoints(gens.g)), negZ));
     const coeff = new Array(nm);
     for (let i = 0; i < nm; i++) coeff[i] = (z * yPow[i] + dVec[i]) % ZK_N;
-    P = zkAdd(P, zkMsm(hPrime, coeff)); }
+    PJ = zkJadd(PJ, zkMsmJ(hPrimeJ, coeff)); }
 
   // Fold: P* = P + t̂·Q + Σ(u_k²·L_k + u_k^{-2}·R_k), bases folded in step.
-  let Pstar = zkAdd(P, zkMul(Q, tHat));
-  let gCur = gens.g.slice(), hCur = hPrime.slice();
+  let Pstar = zkJadd(PJ, zkJmul(zkToJ(Q), tHat));
+  let gCur = gens.g.map(zkToJ), hCur = hPrimeJ;
   for (let k = 0; k < rounds; k++) {
+    await step("inner-product round " + (k + 1) + "/" + rounds, 0.5 + 0.45 * (k / rounds));
     const label = "bp-ipa:" + k;
     t.add(label, zkSec1Encode(L[k])); t.add(label, zkSec1Encode(R[k]));
     const uk = chals[label] = await t.challenge(label);
     if (uk === 0n) bail("zero IPA challenge");
     const ukInv = zkInvN(uk);
-    Pstar = zkAdd(Pstar, zkMul(L[k], uk * uk % ZK_N));
-    Pstar = zkAdd(Pstar, zkMul(R[k], ukInv * ukInv % ZK_N));
+    Pstar = zkJadd(Pstar, zkJmul(zkToJ(L[k]), uk * uk % ZK_N));
+    Pstar = zkJadd(Pstar, zkJmul(zkToJ(R[k]), ukInv * ukInv % ZK_N));
     const half = gCur.length / 2, ng = new Array(half), nh = new Array(half);
     for (let i = 0; i < half; i++) {
-      ng[i] = zkAdd(zkMul(gCur[i], ukInv), zkMul(gCur[half + i], uk));
-      nh[i] = zkAdd(zkMul(hCur[i], uk), zkMul(hCur[half + i], ukInv));
+      ng[i] = zkJmul2(gCur[i], ukInv, gCur[half + i], uk);
+      nh[i] = zkJmul2(hCur[i], uk, hCur[half + i], ukInv);
     }
     gCur = ng; hCur = nh;
   }
-  { const rhs = zkAdd(zkAdd(zkMul(gCur[0], a), zkMul(hCur[0], b)), zkMul(Q, a * b % ZK_N));
-    if (!zkPtEq(Pstar, rhs)) bail("inner-product argument failed"); }
+  await step("final check", 0.95);
+  { const rhs = zkJadd(zkJadd(zkJmul(gCur[0], a), zkJmul(hCur[0], b)), zkJmul(zkToJ(Q), a * b % ZK_N));
+    if (!zkPtEq(zkToAffine(Pstar), zkToAffine(rhs))) bail("inner-product argument failed"); }
 
   // committed-sum-range additionally proves ΣC − T·g opens to 0 on h.
   if (statement === "committed-sum-range") {
@@ -429,6 +476,7 @@ async function verifyZk(bundleZk, expected) {
       bail("sum proof failed");
   }
 
+  await step("done", 1);
   return {
     ok: true, variant, statement, n,
     total: total === null ? null : total.toString(),
