@@ -33,6 +33,24 @@ The only things you trust are **SHA-256** and the **Bitcoin blockchain**. Not us
 > (BitCert Attest daily/monthly, and future products) that conforms to
 > [`docs/bundle-schema.md`](docs/bundle-schema.md).
 
+### Zero-knowledge statements (bundle §8)
+
+Bundles may also carry a **zk** section proving a statement about hidden values
+— "the sum of these committed reserves is at least the issued supply" — without
+revealing the values, or for comparison statements even the sum. The verifier
+checks it with the same rules as everything else here: no dependencies, no
+network, plain BigInt over secp256k1 you can read in
+[`zk-core.js`](zk-core.js).
+
+Two things worth knowing before you trust a green tick on a zk bundle:
+
+- **The public inputs must be YOUR values.** The transcript binds `org_id`,
+  `run_ref` and the threshold, so a verifier that reads them out of the bundle
+  is letting the prover choose which statement it proved. This page has no
+  independent record of yours, so it uses the bundle's own and says so.
+- **A zk-only bundle has no timestamp.** It proves the statement, not when the
+  claim was made. Add the anchor group and Bitcoin supplies the date.
+
 ---
 
 ## Use it
