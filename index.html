@@ -399,15 +399,16 @@ function zkBpChallengeIds(rounds) {
 }
 
 /** Seed the §2.1 preamble onto the first challenge. */
-async function zkSeedTranscript(t, first, statementId, variantId, publicInputParts, ctx) {
-  const gen = await zkGenerators(1);
+async function zkSeedTranscript(t, first, statementId, variantId, publicInputParts, ctx, skipBpDst) {
+  const gen = await zkGenerators(skipBpDst ? 0 : 1);
   const items = [
     zkLenPrefixed("BITCERT-ZKTS:v1"),
     zkLenPrefixed(variantId),
     zkLenPrefixed(statementId),
     zkLenPrefixed("SECP256K1"),
     zkCat(zkSec1Encode(ZK_G), zkSec1Encode(gen.baseH)),
-    zkLenPrefixed(ZK_DST.gvec), zkLenPrefixed(ZK_DST.hvec), zkLenPrefixed(ZK_DST.u),
+    // §2.1 item 5: only bulletproofs binds its vector-generator DSTs.
+    ...(skipBpDst ? [] : [zkLenPrefixed(ZK_DST.gvec), zkLenPrefixed(ZK_DST.hvec), zkLenPrefixed(ZK_DST.u)]),
     ...publicInputParts,
     zkLenPrefixed(ctx.org_id), zkLenPrefixed(ctx.run_ref),
   ];
@@ -431,6 +432,81 @@ class ZkReader {
 
 const ZK_BIT_WIDTH = 64;
 const ZK_MAX_N = 4096;
+
+/** §12.3: ge ⇒ ΣC − S·g ; le ⇒ S·g − ΣC. Derived by the verifier, never read. */
+function zkDeriveSurplus(commitments, threshold, direction) {
+  const sum = zkSumPoints(commitments);
+  const sg = zkMul(ZK_G, threshold);
+  return direction === "ge" ? zkAdd(sum, zkNeg(sg)) : zkAdd(sg, zkNeg(sum));
+}
+
+/* ---------- sigma-fs carrier (spec §7, §12.9) ----------
+ * Bit decomposition with a CDS OR-proof per bit, plus a recomposition link
+ * tying those bits to each commitment. Larger on the wire than bulletproofs by
+ * ~50x, but roughly twice as fast to verify — there is no generator folding,
+ * just a flat pass per bit. */
+
+/** Challenge ids in §7.2 order; cmp drops the trailing sum PoK. */
+function zkSigmaFSChallengeIds(n, withSumPok) {
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < ZK_BIT_WIDTH; j++) ids.push("bit:" + i + ":" + j);
+    ids.push("recompose:" + i);
+  }
+  if (withSumPok) ids.push("sum-pok");
+  return ids;
+}
+
+/**
+ * Verify the per-value obligations against `commitments`. For cmp the last
+ * entry is the DERIVED surplus commitment, not something read off the wire.
+ */
+async function zkSigmaFSVerifyCore(commitments, blocks, t, step) {
+  const gens = await zkGenerators(0);
+  const h = gens.baseH;
+  const negG = zkNeg(ZK_G);
+  for (let i = 0; i < commitments.length; i++) {
+    if (step && i % 4 === 0) await step("value " + (i + 1) + "/" + commitments.length, 0.1 + 0.85 * (i / commitments.length));
+    const { bits, ors, recompose } = blocks[i];
+    let weighted = zkJinf();
+    let pow2 = 1n;
+    for (let j = 0; j < ZK_BIT_WIDTH; j++) {
+      const B = bits[j], o = ors[j];
+      const label = "bit:" + i + ":" + j;
+      for (const p of [B, o.R0, o.R1]) t.add(label, zkSec1Encode(p));
+      const c = await t.challenge(label);
+      const c1 = zkMod(c - o.C0, ZK_N);
+      // z0·h == R0 + c0·B          (branch b=0, Y0 = B)
+      if (!zkPtEq(zkMul(h, o.Z0), zkAdd(o.R0, zkMul(B, o.C0))))
+        throw new Error("sigma-fs: bit OR branch0 (i=" + i + " j=" + j + ")");
+      // z1·h == R1 + c1·(B − g)    (branch b=1, Y1 = B − g)
+      if (!zkPtEq(zkMul(h, o.Z1), zkAdd(o.R1, zkMul(zkAdd(B, negG), c1))))
+        throw new Error("sigma-fs: bit OR branch1 (i=" + i + " j=" + j + ")");
+      weighted = zkJadd(weighted, zkJmul(zkToJ(B), pow2));
+      pow2 = pow2 * 2n % ZK_N;
+    }
+    // Recomposition: C_i − Σ 2^j·B_j must be a known multiple of h.
+    const Y = zkAdd(commitments[i], zkNeg(zkToAffine(weighted)));
+    t.add("recompose:" + i, zkSec1Encode(recompose.R));
+    const c = await t.challenge("recompose:" + i);
+    if (!zkPtEq(zkMul(h, recompose.Z), zkAdd(recompose.R, zkMul(Y, c))))
+      throw new Error("sigma-fs: recomposition (i=" + i + ")");
+  }
+}
+
+/** Read m per-value proof blocks in §7.4 order. */
+function zkReadSigmaFSBlocks(rd, m) {
+  const blocks = [];
+  for (let i = 0; i < m; i++) {
+    const bits = [], ors = [];
+    for (let j = 0; j < ZK_BIT_WIDTH; j++) bits.push(rd.point());
+    for (let j = 0; j < ZK_BIT_WIDTH; j++) {
+      ors.push({ R0: rd.point(), R1: rd.point(), C0: rd.scalar(), Z0: rd.scalar(), Z1: rd.scalar() });
+    }
+    blocks.push({ bits, ors, recompose: { R: rd.point(), Z: rd.scalar() } });
+  }
+  return blocks;
+}
 
 /**
  * verifyZk — the entry point. `bundleZk` is the bundle's §8 `zk` object and
@@ -461,7 +537,6 @@ async function verifyZk(bundleZk, expected, onProgress) {
   // The JSON is a claim about the bytes; disagreement means one of them lies.
   if (bundleZk.variant !== variant) throw new Error("bundle says variant " + bundleZk.variant + ", envelope says " + variant);
   if (bundleZk.statement !== statement) throw new Error("bundle says statement " + bundleZk.statement + ", envelope says " + statement);
-  if (variant !== "bulletproofs") throw new Error("this verifier implements bulletproofs only; envelope is " + variant);
 
   // §8.2 — the caller's own values win. Comparing rather than adopting is what
   // stops the prover from choosing which statement it proved.
@@ -504,6 +579,44 @@ async function verifyZk(bundleZk, expected, onProgress) {
   const digest = await zkCsDigest(commitments);
   if (digest !== claimedDigest) throw new Error("commitment-set digest mismatch");
 
+  if (variant === "sigma-fs") {
+    // §7 carrier. Same statement, same public inputs, different machinery:
+    // one proof block per value, and for cmp one extra block for the surplus
+    // whose commitment we derive rather than read.
+    const m = statement === "committed-sum-cmp" ? n + 1 : n;
+    const blocks = zkReadSigmaFSBlocks(rd, m);
+    const sumPokSF = statement === "committed-sum-range"
+      ? { R: rd.point(), Z: rd.scalar() } : null;
+    rd.end();
+
+    const withD = commitments.slice();
+    if (statement === "committed-sum-cmp") withD.push(zkDeriveSurplus(commitments, threshold, direction));
+
+    await step("generators", 0.05);
+    const gensSF = await zkGenerators(0);
+    const idsSF = zkSigmaFSChallengeIds(m, statement === "committed-sum-range");
+    const tSF = new ZkTranscript(idsSF);
+    const piSF = statement === "committed-sum-range"
+      ? [zkU32be(n), zkU64be(total), zkScalarBytes(digest)]
+      : [zkU32be(n), zkU64be(threshold), Uint8Array.of(direction === "ge" ? 0 : 1), zkScalarBytes(digest)];
+    const stmtIdSF = statement === "committed-sum-range" ? "committed-sum-range:v1" : "committed-sum-cmp:v1";
+    await zkSeedTranscript(tSF, idsSF[0], stmtIdSF, "sigma-fs:v1", piSF, ctx, true);
+    await zkSigmaFSVerifyCore(withD, blocks, tSF, step);
+
+    if (statement === "committed-sum-range") {
+      const Y = zkAdd(zkSumPoints(commitments), zkNeg(zkMul(ZK_G, total)));
+      tSF.add("sum-pok", zkSec1Encode(sumPokSF.R));
+      const c = await tSF.challenge("sum-pok");
+      if (!zkPtEq(zkMul(gensSF.baseH, sumPokSF.Z), zkAdd(sumPokSF.R, zkMul(Y, c))))
+        throw new Error("sigma-fs: sum proof failed");
+    }
+    await step("done", 1);
+    return { ok: true, variant, statement, n,
+      total: total === null ? null : total.toString(),
+      threshold: threshold === null ? null : threshold.toString(),
+      direction, notes, challenges: {} };
+  }
+
   // Aggregate width: cmp appends the derived surplus commitment (spec §12.3).
   const aggCount = statement === "committed-sum-cmp" ? n + 1 : n;
   const m = zkNextPow2(aggCount);
@@ -530,12 +643,7 @@ async function verifyZk(bundleZk, expected, onProgress) {
   // transmitted (spec §8.1) — deriving it IS the padding check.
   const padded = new Array(m).fill(null);
   for (let i = 0; i < n; i++) padded[i] = commitments[i];
-  if (statement === "committed-sum-cmp") {
-    const sum = zkSumPoints(commitments);
-    const sg = zkMul(ZK_G, threshold);
-    // §12.3: ge ⇒ ΣC − S·g ; le ⇒ S·g − ΣC. Derived, never read.
-    padded[n] = direction === "ge" ? zkAdd(sum, zkNeg(sg)) : zkAdd(sg, zkNeg(sum));
-  }
+  if (statement === "committed-sum-cmp") padded[n] = zkDeriveSurplus(commitments, threshold, direction);
 
   await step("transcript", 0.2);
   const ids = zkBpChallengeIds(rounds);

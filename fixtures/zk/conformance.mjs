@@ -54,6 +54,7 @@ const hex = (bytes) => Buffer.from(bytes).toString("hex");
 const scalarHex = (s) => s.toString(16).padStart(64, "0");
 
 let failures = 0;
+const bad = (l, why) => { console.log(`  FAIL  ${l}: ${why}`); failures++; };
 function check(label, got, want) {
   if (got === want) { console.log(`  ok    ${label}`); return true; }
   console.log(`  FAIL  ${label}\n        got  ${got}\n        want ${want}`);
@@ -138,6 +139,42 @@ console.log("\nverification (committed-sum-cmp, bulletproofs)");
     console.log("  FAIL  a `ge` proof verified as `le`");
     failures++;
   } catch { console.log("  ok    direction flip rejected"); }
+}
+
+/* ---- 3c. sigma-fs carrier: same statements, other machinery ----
+ * Two carriers proving one statement is defence in depth — a flaw in one is
+ * caught by the other. It also inverts the cost: ~50x the bytes, ~half the
+ * verification time, because there is no generator folding. */
+console.log("\nverification (sigma-fs carrier)");
+for (const [file, statement, pi] of [
+  ["sigma-fs.proof", "committed-sum-range", { n: 3, total: "1000253" }],
+  ["cmp-ge-sigmafs.proof", "committed-sum-cmp", { n: 5, threshold: "12400000000", direction: "ge" }],
+]) {
+  const env = readFileSync(join(here, file)).toString("base64");
+  const t0 = Date.now();
+  try {
+    const r = await zk.verifyZk(
+      { spec: "zk-transparent-statements-spec/v2.1.0", variant: "sigma-fs", statement,
+        context: GOLDEN_CTX, public_inputs: pi, envelope_b64: env },
+      { context: GOLDEN_CTX, public_inputs: pi });
+    if (!r.ok) { bad(statement, "not ok"); }
+    else console.log(`  ok    ${statement} (${Date.now() - t0} ms, ${Math.round(env.length * 3 / 4 / 1024)} KB)`);
+    if (statement === "committed-sum-cmp" && r.total !== null) {
+      console.log("  FAIL  cmp reported a total"); failures++;
+    }
+  } catch (err) { console.log(`  FAIL  ${statement}: ${err.message}`); failures++; }
+}
+{
+  // A carrier swap must be refused — the variant code point separates them.
+  const env = readFileSync(join(here, "cmp-ge-sigmafs.proof"));
+  const pi = { n: 5, threshold: "12400000000", direction: "ge" };
+  try {
+    await zk.verifyZk(
+      { spec: "zk-transparent-statements-spec/v2.1.0", variant: "bulletproofs", statement: "committed-sum-cmp",
+        context: GOLDEN_CTX, public_inputs: pi, envelope_b64: env.toString("base64") },
+      { context: GOLDEN_CTX, public_inputs: pi });
+    console.log("  FAIL  a sigma-fs envelope verified as bulletproofs"); failures++;
+  } catch { console.log("  ok    carrier swap rejected"); }
 }
 
 /* ---- 4. the verifier must REFUSE a tampered envelope ---- */
