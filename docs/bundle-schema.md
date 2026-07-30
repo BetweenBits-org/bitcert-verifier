@@ -32,16 +32,25 @@ This file is the **authoritative wire contract** shared by:
   "bitcoin_network": "regtest",           // "mainnet" | "testnet" | "signet" | "regtest"
   "generated_at": "2026-05-29T09:00:00Z", // informational only (NOT trusted)
 
-  "record":         { ... },   // REQUIRED — what is being attested (§2)
-  "merkle":         { ... },   // REQUIRED — inclusion proof (§3)
-  "anchor":         { ... },   // REQUIRED — Bitcoin commitment (§4)
+  "record":         { ... },   // REQUIRED in v1/v2 — what is being attested (§2)
+  "merkle":         { ... },   // REQUIRED in v1/v2 — inclusion proof (§3)
+  "anchor":         { ... },   // REQUIRED in v1/v2 — Bitcoin commitment (§4)
   "chain":          { ... },   // OPTIONAL — per-exchange chaining (§5)
-  "reconciliation": { ... }    // OPTIONAL — (a)/(b)/(c) trust computation (§6; v2 daily only)
+  "reconciliation": { ... },   // OPTIONAL — (a)/(b)/(c) trust computation (§6; v2 daily only)
+  "zk":             { ... }    // OPTIONAL, v3+ — zero-knowledge statement proof (§8)
 }
 ```
 
 A verifier MUST reject any bundle whose `schema` is not one of
-`bitcert-proof-bundle/v1` or `bitcert-proof-bundle/v2`. **v2** adds the
+`bitcert-proof-bundle/v1`, `/v2` or `/v3`.
+
+**v3** relaxes `record`/`merkle`/`anchor` from REQUIRED to OPTIONAL and adds the
+`zk` section (§8). A zero-knowledge proof stands on its own mathematics — it
+needs no Bitcoin anchor to be checkable — so a bundle may carry only `zk`. A v3
+bundle MUST contain **at least one** of: the anchor group (`record` + `merkle` +
+`anchor`), or `zk`. Older verifiers reject `/v3` outright, which is the safe
+direction: they refuse rather than silently skipping a section they cannot
+check. **v2** adds the
 `reconciliation` section (§6): the anchor output then commits `day_root` (which binds
 the Merkle root AND the reconciliation) instead of the bare Merkle root. A
 verifier branches on the **presence of `reconciliation`**, not the version
@@ -498,7 +507,7 @@ which then no longer matches the anchor output, so the bundle is rejected.
 
 ## 7. Versioning
 
-`schema` is bumped (`/v2`, …) on any breaking change. Verifiers reject unknown
+`schema` is bumped (`/v2`, `/v3`, …) on any breaking change. Verifiers reject unknown
 majors but accept every supported major listed in §1. The producer and the
 verifiers in this repo share fixtures (`fixtures/*.json`) cross-checked in CI on
 both sides to prevent drift; the `day_root` derivation is additionally pinned as
@@ -512,3 +521,82 @@ Verifiers MUST support **both** witness modes (legacy §4.4.1 and unified §4.4.
 selecting per-bundle by decoding the anchor output as described in §4.4. Its
 known-answer vector is pinned in `docs/UNIFIED-WITNESS-CONTRACT.md` §6 and
 emitted as a unified fixture (`fixtures/07-unified-witness-inscription.json`).
+
+## 8. `zk` — zero-knowledge statement proof (OPTIONAL, v3+)
+
+A `zk` section proves a **statement about hidden values** — e.g. "the sum of
+these committed reserve amounts is at least the issued supply" — without
+revealing the values or, for comparison statements, even the sum.
+
+```jsonc
+"zk": {
+  "spec": "zk-transparent-statements-spec/v2.1.0",  // REQUIRED — wire contract version
+  "variant": "bulletproofs",                        // "bulletproofs" | "sigma-fs"
+  "statement": "committed-sum-cmp",                 // see §8.1
+  "context": {                                      // REQUIRED — transcript binding
+    "org_id":  "00000000-0000-4000-8000-00000000d1a6",
+    "run_ref": "diag-mint-ms72ms9c"
+  },
+  "public_inputs": {                                // REQUIRED — statement dependent
+    "n": 5,
+    "threshold": "12400000000",                     // cmp only, u64 decimal STRING
+    "direction": "ge"                               // cmp only, "ge" | "le"
+    // range only: "total": "13020000000"
+  },
+  "envelope_b64": "WktUUwECAg…"                     // REQUIRED — proof bytes, base64
+}
+```
+
+### 8.1 Statements
+
+| `statement` | Proves | Sum revealed? |
+|---|---|---|
+| `committed-sum-range` | Σvᵢ equals the public `total`, and every vᵢ ∈ [0, 2⁶⁴) | Yes (`total`) |
+| `committed-sum-cmp` | Σvᵢ ≥ `threshold` (`direction: ge`) or ≤ it (`le`), and every vᵢ ∈ [0, 2⁶⁴) | **No** |
+
+`committed-sum-cmp` is carried by `bulletproofs` only.
+
+### 8.2 Why `context` and `public_inputs` are separate from the envelope
+
+**They are not decoration — the proof cannot be checked without them, and they
+must not be read out of the proof.**
+
+The Fiat–Shamir transcript binds `org_id`, `run_ref` and the public inputs, so a
+verifier rebuilds the challenge stream from them. If it took those values from
+inside the envelope instead, the prover would be choosing *which statement it
+proved* — it could mint a proof for a threshold of 1 and present it as a proof
+for a threshold of a billion. So:
+
+> A verifier MUST populate `context` and `public_inputs` from **its own
+> records** and treat the bundle's copies as untrusted claims to be compared
+> against them. Accepting the bundle's values unchecked makes the result
+> meaningless.
+
+For `committed-sum-cmp` the sum is deliberately absent — publishing it would
+defeat the statement's purpose. `n` and the threshold are public by design.
+
+### 8.3 What a `zk`-only bundle does NOT prove
+
+A bundle with `zk` and no anchor group proves the statement **but says nothing
+about when it was made**. Nothing stops a prover from generating it today and
+claiming it describes last quarter. A verifier MUST report that gap explicitly
+rather than let "verified" imply a timestamp.
+
+Adding the anchor group closes it: the same bundle then proves the statement AND
+that the claim existed at a block height nobody can backdate.
+
+### 8.4 Verification outline
+
+1. Reject unknown `spec` versions. The wire contract is frozen per version and
+   v1.x/v2.x envelopes are **not** interchangeable (the curve changed).
+2. Parse the envelope: `"ZKTS"` ‖ version ‖ variant ‖ statement ‖ body.
+   Reject a mismatch against the JSON `variant`/`statement` fields.
+3. Re-derive the generators (try-and-increment, spec §14.4) — do not trust any
+   value in the bundle for these.
+4. Recompute `cs_digest` from the received commitments and compare.
+5. Rebuild the transcript from `context` + `public_inputs` and verify the
+   bulletproofs equations (spec §8.2) — for `committed-sum-cmp`, derive the
+   surplus commitment D yourself (spec §12.3) rather than reading it.
+
+The normative source for every step is the frozen spec
+`zk-transparent-statements-spec.md`; this section is the bundle envelope around it.
