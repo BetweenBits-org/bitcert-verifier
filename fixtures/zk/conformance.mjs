@@ -170,5 +170,25 @@ console.log("\nnegative: the caller's expectation wins over the bundle");
   } catch { console.log("  ok    mismatched total refused"); }
 }
 
+/* ---- 6. a bundle cannot misstate what it proved ----
+ * The parameters are transcript-bound, so relabelling them in the JSON must
+ * fail. This is what lets the UI present the displayed values as genuine
+ * rather than as an unverified claim. */
+console.log("\nnegative: the bundle cannot relabel its own claim");
+{
+  const cmpProof = readFileSync(join(here, "cmp-ge.proof"));
+  for (const [field, value] of [["threshold", "1"], ["direction", "le"], ["n", 4]]) {
+    const pi = { n: 5, threshold: "12400000000", direction: "ge", [field]: value };
+    try {
+      await zk.verifyZk(
+        { spec: "zk-transparent-statements-spec/v2.1.0", variant: "bulletproofs", statement: "committed-sum-cmp",
+          context: GOLDEN_CTX, public_inputs: pi, envelope_b64: cmpProof.toString("base64") },
+        { context: GOLDEN_CTX, public_inputs: pi });
+      console.log(`  FAIL  a bundle claiming ${field}=${value} verified`);
+      failures++;
+    } catch { console.log(`  ok    relabelled ${field} rejected`); }
+  }
+}
+
 console.log(failures === 0 ? "\nPASS — JS matches the Go contract" : `\nFAIL — ${failures} mismatch(es)`);
 process.exit(failures === 0 ? 1 * 0 : 1);

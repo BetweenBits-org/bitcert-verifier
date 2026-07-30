@@ -1006,17 +1006,19 @@ async function verifyZkSection(z){
       : "sum of "+res.n+" hidden values = "+res.total;
     renderStep("ok","ZK statement verified — "+claim,
       res.statement+" · "+res.variant+" · run "+(z.context&&z.context.run_ref||"?"));
-    const what = pi.threshold!==undefined
-      ? "threshold <b>"+pi.threshold+"</b> ("+(pi.direction==="ge"?"at least":"at most")+")"
-      : "total <b>"+pi.total+"</b>";
-    renderStep("warn","The maths is proven. Check that it is the RIGHT claim.",
-      "The proof is valid — but it proves a claim about run <b>"
-      +((z.context&&z.context.run_ref)||"?")+"</b> of org <b>"
-      +((z.context&&z.context.org_id)||"?")+"</b>, with "+what+"."
-      +" Those values came from this file, and this page has no way to know what you "
-      +"were promised. Compare them against your own records: if the issuer owed you "
-      +"a statement about a different period, or a larger threshold, a perfectly valid "
-      +"proof of a smaller claim would still show up green here.");
+    renderStep("warn","What this proof does NOT establish",
+      "The parameters above are genuine — they are bound into the proof, so a bundle "
+      +"cannot claim one threshold and prove another (try editing them: verification "
+      +"fails). Two things still sit outside the mathematics:<br><br>"
+      +"<b>1. Whether this is the statement you were owed.</b> The proof is about run "
+      +"<b>"+((z.context&&z.context.run_ref)||"?")+"</b> of org <b>"
+      +((z.context&&z.context.org_id)||"?")+"</b>. This page has no record of what you "
+      +"were promised, so compare those against yours — a valid proof about the wrong "
+      +"period or the wrong entity is still the wrong proof.<br><br>"
+      +"<b>2. Whether the hidden values are real.</b> This proves an arithmetic relation "
+      +"among committed numbers. It does not prove those commitments correspond to "
+      +"assets that exist — nothing here carries a bank or custodian attestation. "
+      +"That link is a separate control, and this bundle does not supply it.");
     return true;
   }catch(err){
     progress(null);
