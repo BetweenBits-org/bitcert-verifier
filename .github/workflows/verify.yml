@@ -46,6 +46,21 @@ jobs:
       - name: Browser JS == Python == ann-core test vector
         run: node fixtures/browser-js-check.mjs
 
+      # ---- zk (bundle §8) -------------------------------------------------
+      # Three implementations of one frozen contract: the Go engine, zk-core.js
+      # and index.html's inlined copy. Nothing but these gates stops them
+      # drifting, and a drift shows up as "does not verify" with no clue why —
+      # so the conformance runner compares the CHALLENGE STREAM step by step
+      # and names the exact challenge where two implementations part company.
+      - name: zk — index.html inline copy matches zk-core.js
+        run: node tools/inline-zk.mjs --check
+
+      - name: zk — JS matches the Go golden vectors (generators, digest, challenges)
+        run: node fixtures/zk/conformance.mjs
+
+      - name: zk — the inlined verifier that actually ships still runs
+        run: node fixtures/zk/browser-path.mjs
+
       - name: Publish SHA256(index.html) for reproducible-build matching
         run: |
           sha256sum index.html | tee index.html.sha256
