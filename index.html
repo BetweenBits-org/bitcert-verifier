@@ -217,7 +217,8 @@
   .treewrap > *{ min-width:0; }
   .treecol{ display:flex; flex-direction:column; }
   .treebox{ background:var(--surface-2); border:1px solid var(--line); border-radius:12px;
-    padding:8px; overflow:auto; flex:1; display:grid; align-content:center; }
+    padding:8px; overflow:auto; flex:1; display:grid; align-content:center;
+    justify-content:center; }
   .treebox svg{ display:block; width:100%; height:auto; min-width:460px; }
   .edge{ stroke:var(--line-2); stroke-width:2; fill:none; transition:stroke .35s,stroke-width .35s; }
   .edge.path{ stroke:var(--accent); stroke-width:3; }
@@ -226,6 +227,7 @@
   .node .box{ fill:var(--surface); stroke:var(--line-2); stroke-width:1.5; }
   .node .nlabel{ font-family:var(--mono); font-size:10px; fill:var(--ink-2); transition:fill .3s; }
   .node .ntag{ font-family:var(--mono); font-size:8.5px; fill:var(--ink-3); letter-spacing:.06em; }
+  .ecap{ font-family:var(--mono); font-size:9.5px; fill:var(--ink-3); }
   .node.target .box{ fill:var(--accent-soft); stroke:var(--accent); stroke-width:2; }
   .node.sib .box{ stroke:var(--accent); stroke-dasharray:4 3; }
   .node.lit .box{ fill:var(--ok-soft); stroke:var(--ok); stroke-width:2.4; }
@@ -387,13 +389,13 @@
   </section>
 
   <section id="secTree" hidden aria-labelledby="s4h">
-    <div class="sec-head"><span class="sec-num">Merkle</span><h2 id="s4h">Inclusion path</h2></div>
-    <p class="sec-sub">Only the nodes the proof actually carries are drawn: this record's leaf,
+    <div class="sec-head"><span class="sec-num" id="treeKicker">Merkle</span><h2 id="s4h">Inclusion path</h2></div>
+    <p class="sec-sub" id="treeSub">Only the nodes the proof actually carries are drawn: this record's leaf,
       one sibling per level, and the parents recomputed here from them.</p>
     <div class="treewrap">
       <div class="treecol">
         <div class="treebox"><svg id="tree" role="img" aria-label="Merkle inclusion path"></svg></div>
-        <div class="legend">
+        <div class="legend" id="treeLegend">
           <span><i class="sw t"></i>this record</span>
           <span><i class="sw s"></i>sibling from the proof</span>
           <span><i class="sw l"></i>recomputed here</span>
@@ -1247,6 +1249,7 @@ async function verifyWitnessBundle(bundle){
       const rootOk=m.ok&&eqHex(m.computedRoot,anchored);
       renderStep(rootOk?"ok":"bad","2 · On-chain commitment — record "+(rootOk?"binds to":"does NOT bind to")+" the anchor output merkle_root ("+decoded.format+")",
         "recomputed root:    "+m.computedRoot+"<br>anchor output merkle_root: "+anchored);
+      markChainAnchor(rootOk, "anchor payload merkle_root", anchored, "committed as-is in the payload");
       allOk=allOk&&rootOk;
     }
   } catch(e){ allOk=false; renderStep("bad","1 · Transaction binding — error","//"+e.message); }
@@ -1457,7 +1460,7 @@ function reset(){
   $("bundleGrid").innerHTML=""; $("strip").innerHTML="";
   $("decode").className="decode"; $("decode").innerHTML="";
   $("matchflag").className="matchflag"; $("matchflag").textContent="";
-  $("tree").innerHTML=""; $("detail").innerHTML="";
+  $("tree").innerHTML=""; $("tree").removeAttribute("style"); $("detail").innerHTML="";
   $("ocResult").hidden=true; $("ocResult").textContent="";
   status(""); progress(null);
 }
@@ -1561,12 +1564,101 @@ const SVGNS="http://www.w3.org/2000/svg";
 function svgEl(n,a){ const e=document.createElementNS(SVGNS,n); for(const k in a) e.setAttribute(k,a[k]); return e; }
 let treeNodes={}, treeState=null;
 
-function buildTree(m, mk, record){
+const BOXH=40;
+/* One canvas, two shapes. Both draw the same node/edge vocabulary; only the
+ * layout differs, because a one-record anchor has no path to lay out. */
+function treeCanvas(W,H,label){
   const svg=$("tree"); svg.innerHTML=""; treeNodes={};
+  svg.setAttribute("viewBox","0 0 "+W+" "+H);
+  svg.setAttribute("aria-label",label);
+  // Never blow a small drawing up to the column width — a lone box scaled 2.4x
+  // reads as a design element rather than a value. Wide ones still shrink.
+  svg.style.maxWidth=W+"px";
+  svg.style.minWidth=Math.min(460,W)+"px";
+  const edges=svgEl("g",{}); svg.appendChild(edges);
+  return {
+    edge(x1,y1,x2,y2,id){
+      const p=svgEl("path",{class:"edge",d:"M"+x1+" "+y1+" C "+x1+" "+((y1+y2)/2)+" "+x2+" "+((y1+y2)/2)+" "+x2+" "+y2});
+      edges.appendChild(p); treeNodes[id]=p; return p;
+    },
+    caption(x,y,text){
+      const t=svgEl("text",{x:x,y:y,class:"ecap"}); t.textContent=text; svg.appendChild(t); return t;
+    },
+    node(x,y,w,label,tag,cls,id,pick){
+      const g=svgEl("g",{class:"node "+cls,transform:"translate("+x+","+y+")"});
+      g.appendChild(svgEl("rect",{x:-w/2,y:-BOXH/2,width:w,height:BOXH,rx:7,class:"box"}));
+      if(tag){ const tg=svgEl("text",{x:0,y:-4,"text-anchor":"middle",class:"ntag"}); tg.textContent=tag; g.appendChild(tg); }
+      const tx=svgEl("text",{x:0,y:12,"text-anchor":"middle",class:"nlabel"}); tx.textContent=label; g.appendChild(tx);
+      svg.appendChild(g); treeNodes[id]=g;
+      if(pick){ g.classList.add("pick"); g.setAttribute("tabindex","0"); g.setAttribute("role","button");
+        g.addEventListener("click",pick);
+        g.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); pick(); } });
+      }
+      return g;
+    }
+  };
+}
+
+function setTreeMode(chain){
+  $("treeKicker").textContent=chain?"Commitment":"Merkle";
+  $("s4h").textContent=chain?"Direct commitment":"Inclusion path";
+  $("treeSub").textContent=chain
+    ? "This transaction anchored a single record, so there is no path to walk: the record's own hash is the root, and that root is what the anchor payload carries."
+    : "Only the nodes the proof actually carries are drawn: this record's leaf, one sibling per level, and the parents recomputed here from them.";
+  $("treeLegend").innerHTML=chain
+    ? '<span><i class="sw t"></i>this record</span><span><i class="sw l"></i>recomputed here</span>'
+    : '<span><i class="sw t"></i>this record</span><span><i class="sw s"></i>sibling from the proof</span>'
+      +'<span><i class="sw l"></i>recomputed here</span>';
+}
+
+/* A batch of one. Drawing it as a tree meant a single box captioned "leaf" under
+ * a heading promising siblings that do not exist. What DOES exist is a chain:
+ * the record's bytes, the root they hash to, and the payload slot holding it. */
+function buildChain(m, mk, record){
+  const boxW=214, pad=22, rowH=98;
+  const W=boxW+pad*2+248, H=rowH*2+BOXH+pad*2;
+  const c=treeCanvas(W,H,"Direct commitment chain");
+  const cx=pad+boxW/2, Y=i=>H-pad-BOXH/2-i*rowH, capX=cx+boxW/2+14;
+  c.edge(cx,Y(0)-BOXH/2,cx,Y(1)+BOXH/2,"e_c0");
+  c.edge(cx,Y(1)-BOXH/2,cx,Y(2)+BOXH/2,"e_c1");
+  c.caption(capX,(Y(0)+Y(1))/2+4,"sha256(0x00 ‖ leaf_bytes)");
+  treeNodes.cap1=c.caption(capX,(Y(1)+Y(2))/2+4,"not compared yet");
+  c.node(cx,Y(0),boxW,tag8(record.leaf_bytes),"record leaf_bytes","target","c0",()=>selectNode("leaf",0));
+  c.node(cx,Y(1),boxW,tag8(m.computedRoot),"root · single leaf","root","c1",()=>selectNode("root",0));
+  c.node(cx,Y(2),boxW,"—","anchor payload","","c2",()=>selectNode("onchain",0));
+  treeState={ m:m, mk:mk, record:record, d:0, chain:true, anchor:null };
+  setTreeMode(true);
+  selectNode("leaf",0);
+  show("secTree");
+}
+
+/* Filled in by the anchor-output check, so the picture reports the comparison
+ * that check actually made rather than one drawn here a second time. */
+function markChainAnchor(ok, slotLabel, value, note){
+  if(!treeState || !treeState.chain || !treeNodes.c2) return;
+  // The witness path verifies without running the chain animation, so settle the
+  // root box from the recomputation rather than leaving it mid-state.
+  if(!treeNodes.c1.classList.contains("lit") && !treeNodes.c1.classList.contains("bad")){
+    treeNodes.c1.classList.add(treeState.m.ok?"lit":"bad");
+    treeNodes.e_c0.classList.add("path");
+    if(treeState.m.ok) treeNodes.e_c0.classList.add("lit");
+  }
+  treeNodes.c2.querySelector(".ntag").textContent=slotLabel;
+  treeNodes.c2.querySelector(".nlabel").textContent=tag8(value);
+  treeNodes.c2.classList.add(ok?"lit":"bad");
+  treeNodes.e_c1.classList.add("path");
+  if(ok) treeNodes.e_c1.classList.add("lit");
+  if(treeNodes.cap1) treeNodes.cap1.textContent=note;
+  treeState.anchor={ ok:ok, label:slotLabel, value:value };
+  if(treeState.selected==="onchain") selectNode("onchain",0);
+}
+
+function buildTree(m, mk, record){
   const d=m.path.length;
+  if(d===0) return buildChain(m, mk, record);
   const half=Math.max(56,Math.min(112,Math.round(560/(d+1))));
   const rowH=Math.max(66,Math.min(96,102-d*3));
-  const boxW=Math.min(148,half*2-16), boxH=40, pad=22;
+  const boxW=Math.min(148,half*2-16), boxH=BOXH, pad=22;
   const xs=new Array(d+1), sx=new Array(d);
   xs[d]=0;
   for(let i=d-1;i>=0;i--){
@@ -1576,25 +1668,9 @@ function buildTree(m, mk, record){
   }
   let lo=Math.min.apply(null,xs.concat(sx.length?sx:[])), hi=Math.max.apply(null,xs.concat(sx.length?sx:[]));
   const W=(hi-lo)+boxW+pad*2, H=d*rowH+boxH+pad*2;
-  svg.setAttribute("viewBox","0 0 "+W+" "+H);
+  const c=treeCanvas(W,H,"Merkle inclusion path");
   const X=v=>v-lo+pad+boxW/2, Y=i=>H-pad-boxH/2-i*rowH;
-  const edges=svgEl("g",{}); svg.appendChild(edges);
-  function edge(x1,y1,x2,y2,id){
-    const p=svgEl("path",{class:"edge",d:"M"+x1+" "+y1+" C "+x1+" "+((y1+y2)/2)+" "+x2+" "+((y1+y2)/2)+" "+x2+" "+y2});
-    edges.appendChild(p); treeNodes[id]=p;
-  }
-  function node(x,y,w,label,tag,cls,id,pick){
-    const g=svgEl("g",{class:"node "+cls,transform:"translate("+x+","+y+")"});
-    g.appendChild(svgEl("rect",{x:-w/2,y:-boxH/2,width:w,height:boxH,rx:7,class:"box"}));
-    if(tag){ const tg=svgEl("text",{x:0,y:-4,"text-anchor":"middle",class:"ntag"}); tg.textContent=tag; g.appendChild(tg); }
-    const tx=svgEl("text",{x:0,y:12,"text-anchor":"middle",class:"nlabel"}); tx.textContent=label; g.appendChild(tx);
-    svg.appendChild(g); treeNodes[id]=g;
-    if(pick){ g.classList.add("pick"); g.setAttribute("tabindex","0"); g.setAttribute("role","button");
-      g.addEventListener("click",pick);
-      g.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); pick(); } });
-    }
-    return g;
-  }
+  const edge=c.edge, node=c.node;
   for(let i=0;i<d;i++){
     edge(X(xs[i]),Y(i)-boxH/2,X(xs[i+1]),Y(i+1)+boxH/2,"e_n"+i);
     edge(X(sx[i]),Y(i)-boxH/2,X(xs[i+1]),Y(i+1)+boxH/2,"e_s"+i);
@@ -1608,8 +1684,8 @@ function buildTree(m, mk, record){
       isRoot?"recomputed root":"node "+(i+1), isRoot?"root":"", "n"+(i+1),
       (idx=>()=>selectNode(idx+1===d?"root":"node",idx+1))(i));
   }
-  if(d===0){ treeNodes.n0.classList.add("root"); }
-  treeState={ m:m, mk:mk, record:record, d:d };
+  treeState={ m:m, mk:mk, record:record, d:d, chain:false, anchor:null };
+  setTreeMode(false);
   selectNode("leaf",0);
   show("secTree");
 }
@@ -1617,6 +1693,7 @@ function tag8(h){ return String(h).slice(0,8)+"…"; }
 
 function selectNode(kind, i){
   if(!treeState) return;
+  treeState.selected=kind;
   const m=treeState.m, mk=treeState.mk, rec=treeState.record;
   const row=(k,v,mono)=>'<div class="frow"><div class="fk">'+esc(k)+'</div><div class="fv'+(mono?" hash":"")+'">'+esc(v)+'</div></div>';
   let html="";
@@ -1644,6 +1721,14 @@ function selectNode(kind, i){
       row("value",m.path[i-1].parent,true)+
       '<div class="privnote">Computed in this browser from the leaf and the siblings above. '+
       'Nothing in the bundle asserts it.</div>';
+  } else if(kind==="onchain"){
+    const a=treeState.anchor;
+    html='<div class="dh">on-chain</div>'+
+      '<div class="dt">'+esc(a?(a.ok?"the payload carries this root":"the payload carries a different value"):"not compared yet")+'</div>'+
+      '<div class="dtag">'+esc(a?a.label:"waiting for the anchor output check")+'</div>'+
+      (a?row("value in the payload",a.value,true)+row("recomputed here",m.computedRoot,true):"")+
+      '<div class="privnote">These bytes sit inside the Bitcoin transaction. Everything below '+
+      'them is recomputed in this browser; the comparison is what ties the two together.</div>';
   } else {
     html='<div class="dh">root</div><div class="dt">'+(m.ok?"recomputed root matches":"recomputed root differs")+'</div>'+
       '<div class="dtag">'+(m.ok?"inclusion holds":"inclusion FAILS")+'</div>'+
@@ -1656,7 +1741,16 @@ function selectNode(kind, i){
 
 async function animateTree(m){
   const d=m.path.length;
-  if(!d){ if(treeNodes.n0) treeNodes.n0.classList.add(m.ok?"lit":"bad"); return; }
+  if(!d){
+    if(!treeNodes.c0) return;
+    treeNodes.c0.classList.add("lit");
+    await wait(300);
+    treeNodes.e_c0.classList.add("path","lit");
+    treeNodes.c1.classList.add(m.ok?"lit":"bad");
+    if(!REDUCE){ treeNodes.c1.classList.add("pulse"); setTimeout(()=>treeNodes.c1.classList.remove("pulse"),1100); }
+    await wait(320);
+    return;
+  }
   const per=Math.max(90,Math.min(360,Math.round(1100/d)));
   treeNodes.n0.classList.add("lit");
   await wait(Math.min(300,per));
@@ -1810,6 +1904,8 @@ async function verify(){
       const ok=merkleRoot && eqHex(expectedDayRoot,anchored);
       await wait(260);
       flagRoot(ok, ok?"day_root matches the anchor output":"day_root does NOT match the anchor output");
+      markChainAnchor(ok, "anchor payload day_root", anchored,
+        "day_root(exchange, date, root, reconciliation)");
       renderStep(ok?"ok":"bad","2 · anchor output commitment — day_root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
         "anchor output day_root:  "+anchored+"<br>recomputed day_root: "+expectedDayRoot+(ok?"":"<br>does not match"));
       allOk=allOk&&ok;
@@ -1817,6 +1913,7 @@ async function verify(){
       const ok=merkleRoot && eqHex(anchored,merkleRoot);
       await wait(260);
       flagRoot(ok, ok?"recomputed root matches the anchor output":"recomputed root does NOT match the anchor output");
+      markChainAnchor(ok, "anchor payload merkle_root", anchored, "committed as-is in the payload");
       renderStep(ok?"ok":"bad","2 · anchor output commitment — root is "+(ok?"committed":"NOT committed")+" on-chain ("+decoded.format+")",
         "anchor output merkle_root: "+anchored+(ok?"":"<br>does not equal the Merkle root above"));
       allOk=allOk&&ok;
