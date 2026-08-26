@@ -1,0 +1,1 @@
+VALID (exit 0)

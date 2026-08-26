@@ -1,11 +1,11 @@
 /* =============================================================================
- * conformance.mjs — cross-implementation gate for the zk verifier.
+ * conformance.mjs - cross-implementation gate for the zk verifier.
  *
  * The engine (Go) and this verifier (JS) implement the same frozen contract
  * twice. Nothing but a shared fixture stops them drifting: a changed DST, a
  * reordered transcript binding, a different point encoding all produce "does
  * not verify" with no hint of where. So this runner checks the JS against the
- * Go-generated golden fixtures, and — critically — compares the CHALLENGE
+ * Go-generated golden fixtures, and - critically - compares the CHALLENGE
  * STREAM step by step, so a divergence names the exact challenge it started at.
  *
  * Run: node fixtures/zk/conformance.mjs
@@ -26,7 +26,7 @@ const require = createRequire(import.meta.url);
 const zk = require(join(repo, "zk-core.js"));
 
 /* The Go fixture's context and public inputs (golden_test.go). A verifier must
- * supply these from its own records — here the fixture definition IS the
+ * supply these from its own records - here the fixture definition IS the
  * record. */
 const GOLDEN_CTX = { org_id: "00000000-0000-0000-0000-00000000abcd", run_ref: "golden:v1" };
 const GOLDEN_VALUES = [3n, 250n, 1000000n];
@@ -35,7 +35,7 @@ const GOLDEN_TOTAL = GOLDEN_VALUES.reduce((a, b) => a + b, 0n).toString();
 function parseVectors(text) {
   const out = { generators: {}, commitments: [], challenges: {} };
   for (const line of text.split("\n")) {
-    // Challenge ids contain colons (bp-ipa:3), so they need their own pattern —
+    // Challenge ids contain colons (bp-ipa:3), so they need their own pattern -
     // a first-colon split silently produces the key "chal bp-ipa".
     const c = /^chal (\S+):\s*([0-9a-f]+)$/.exec(line.trim());
     if (c) { out.challenges[c[1]] = c[2]; continue; }
@@ -65,7 +65,7 @@ function check(label, got, want) {
 const vectors = parseVectors(readFileSync(join(here, "vectors.txt"), "utf8"));
 const proof = readFileSync(join(here, "bulletproofs.proof"));
 
-console.log(`zk conformance — ${vectors.spec}\n`);
+console.log(`zk conformance - ${vectors.spec}\n`);
 
 /* ---- 1. generators: derived independently, must equal Go's ---- */
 console.log("generators (try-and-increment, spec §14.4)");
@@ -142,7 +142,7 @@ console.log("\nverification (committed-sum-cmp, bulletproofs)");
 }
 
 /* ---- 3c. sigma-fs carrier: same statements, other machinery ----
- * Two carriers proving one statement is defence in depth — a flaw in one is
+ * Two carriers proving one statement is defence in depth - a flaw in one is
  * caught by the other. It also inverts the cost: ~50x the bytes, ~half the
  * verification time, because there is no generator folding. */
 console.log("\nverification (sigma-fs carrier)");
@@ -165,7 +165,7 @@ for (const [file, statement, pi] of [
   } catch (err) { console.log(`  FAIL  ${statement}: ${err.message}`); failures++; }
 }
 {
-  // A carrier swap must be refused — the variant code point separates them.
+  // A carrier swap must be refused - the variant code point separates them.
   const env = readFileSync(join(here, "cmp-ge-sigmafs.proof"));
   const pi = { n: 5, threshold: "12400000000", direction: "ge" };
   try {
@@ -227,5 +227,5 @@ console.log("\nnegative: the bundle cannot relabel its own claim");
   }
 }
 
-console.log(failures === 0 ? "\nPASS — JS matches the Go contract" : `\nFAIL — ${failures} mismatch(es)`);
+console.log(failures === 0 ? "\nPASS - JS matches the Go contract" : `\nFAIL - ${failures} mismatch(es)`);
 process.exit(failures === 0 ? 1 * 0 : 1);

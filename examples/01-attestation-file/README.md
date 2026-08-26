@@ -6,4 +6,4 @@
 python3 ../../verify-cli/verify.py bundle.json --original original-report.txt
 ```
 
-Expected: every check ✓ → **VERIFIED**. Try editing `original-report.txt` by one byte and re-run: step 0 (Original binding) then FAILS — the file no longer matches what was anchored.
+Expected: every check ✓ → **VERIFIED**. Try editing `original-report.txt` by one byte and re-run: step 0 (Original binding) then FAILS - the file no longer matches what was anchored.
