@@ -1,6 +1,6 @@
 # 03 · Tampered original is caught (link A)
 
-Same anchored bundle as example 01, but the original file was altered. Links B/C (Merkle + Bitcoin) still pass — the anchor is real — yet the document no longer hashes to the anchored leaf, so step 0 FAILS.
+Same anchored bundle as example 01, but the original file was altered. Links B/C (Merkle + Bitcoin) still pass - the anchor is real - yet the document no longer hashes to the anchored leaf, so step 0 FAILS.
 
 ```bash
 python3 ../../verify-cli/verify.py bundle.json --original tampered-report.txt

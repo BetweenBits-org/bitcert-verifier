@@ -1,6 +1,6 @@
-# 06 · Daily day_root (v2 — the anchor commits the trust reconciliation)
+# 06 · Daily day_root (v2 - the anchor commits the trust reconciliation)
 
-A **v2** daily bundle. The anchor output no longer carries the bare customer-balance Merkle root — it carries `day_root`:
+A **v2** daily bundle. The anchor output no longer carries the bare customer-balance Merkle root - it carries `day_root`:
 
 ```
 recon_commitment = SHA256("attest:daily:recon\n"  || JCS{assets_hash, business_date, exchange_id, reconciliation_ok})

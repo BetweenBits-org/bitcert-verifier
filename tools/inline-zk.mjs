@@ -1,5 +1,5 @@
 /* =============================================================================
- * inline-zk.mjs — keep index.html's copy of zk-core.js honest.
+ * inline-zk.mjs - keep index.html's copy of zk-core.js honest.
  *
  * index.html must stay a single self-contained file (save it, run it offline,
  * forever). zk-core.js exists so the same code can be unit-tested and read on
@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
-const BEGIN = "/* ===== BEGIN inlined zk-core.js — edit zk-core.js, then run tools/inline-zk.mjs ===== */";
+const BEGIN = "/* ===== BEGIN inlined zk-core.js - edit zk-core.js, then run tools/inline-zk.mjs ===== */";
 const END = "/* ===== END inlined zk-core.js ===== */";
 
 /** The browser copy drops the CommonJS export tail and the duplicate directive. */
