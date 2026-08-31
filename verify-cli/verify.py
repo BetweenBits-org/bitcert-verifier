@@ -1361,6 +1361,521 @@ def leaf_input_from_bundle(bundle):
         if alg == ALG_WEBAUTHN_ES256 else issuer_sig_bytes(alg, sig)
     return leaf_input_v2(LEAF_TYPE_ISSUANCE, record_bytes(*args), s)
 
+# =============================================================================
+# leaf v2 party-model primitives / bundle v5 (docs/bundle-schema.md §12)
+#
+# N0 scope: the frozen PRIMITIVES only - cosign message, the 0x10 multi-signature
+# envelope parser/assembler, secp256k1 ECDSA (issuer_alg 0x04), the Bitcoin
+# message digest, and the appendix-B policy grammar gate. The full v5 bundle
+# pipeline (signers[] verification, MUST 1-13) lands in N1; until then a v5
+# bundle is reported as "Unsupported schema" → REJECTED, by design.
+#
+# Oracle: fixtures/bc30-v2-vectors.json sections `cosign`, `wallet`, `multisig`,
+# `policy_open`, `es256_plain_alternate_s`, `negative_v2` (byte-identical copy of
+# ann-core/crates/bc30-leaf/tests/vectors/bc30-v2-kat.json). --selftest and
+# fixtures/generate.py both run kat_v2_party_checks() against it.
+# =============================================================================
+
+COSIGN_TAG = b"BC30/cosign/v1"
+ALG_WALLET_SECP256K1 = 4               # issuer_alg 0x04: s = 0x04 ‖ r(32) ‖ s(32), 65 B
+ALG_MULTISIG = 0x10                    # issuer_alg 0x10: role-labelled multi-signature
+CURVE_SECP256K1 = 2                    # curve_id 2 = secp256k1 (1 = P-256)
+# role_ord is a SORT-ONLY constant, never on the wire; the vocabulary is closed
+# (an open list would let an undefined role dodge the tl_proof requirement).
+ROLE_ORD = {"issuer": 0, "co-issuer": 1, "subject-consent": 2, "endorser": 3}
+MULTISIG_MIN_COUNT, MULTISIG_MAX_COUNT = 2, 8
+MULTISIG_MAX_LEN = 8192                # the 8 KB cap applies to the 0x10 envelope ONLY
+INNER_ALG_CURVE = {ALG_WEBAUTHN_ES256: CURVE_P256, ALG_ES256_PLAIN: CURVE_P256,
+                   ALG_WALLET_SECP256K1: CURVE_SECP256K1}
+
+WALLET_MSG_ISSUANCE = b"BC30 issuance "          # ‖ lowercase_hex(m)   (single-sig)
+WALLET_MSG_COSIGN = b"BC30 cosign "              # ‖ lowercase_hex(m_i) (0x10 entry)
+WALLET_MSG_REGISTRATION = b"BC30 key registration "  # ‖ lowercase_hex(challenge)
+BITCOIN_MSG_PREFIX = b"\x18Bitcoin Signed Message:\n"
+
+def cosign_message(m, role):
+    """m_i = SHA256("BC30/cosign/v1" ‖ m ‖ role_len(1) ‖ role_utf8). EVERY 0x10
+    entry signs its own m_i - the first entry included; the role being inside the
+    signed message is what makes re-labelling detectable at verification."""
+    role_b = role.encode("utf-8")
+    if not (1 <= len(role_b) <= 32):
+        raise ValueError("role must be 1..32 UTF-8 bytes")
+    return sha256(COSIGN_TAG + _need(m, 32, "m") + bytes([len(role_b)]) + role_b)
+
+# ----- secp256k1 (SEC 2 v2.0 §2.4.1) - same plain-affine style as P-256 above -----
+# a = 0, so the doubling slope loses the +a term; everything else is the same
+# arithmetic with the secp256k1 field/order/generator. Exercised by --selftest
+# against the engine KAT (wallet + multisig sections).
+_SECP256K1_P = 2**256 - 2**32 - 977
+_SECP256K1_B = 7
+_SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+_SECP256K1_G = (0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,
+                0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8)
+
+def _k1_double(P):
+    if P is None: return None
+    x, y = P
+    if y == 0: return None
+    lam = (3 * x * x) * pow(2 * y, -1, _SECP256K1_P) % _SECP256K1_P
+    x3 = (lam * lam - 2 * x) % _SECP256K1_P
+    return (x3, (lam * (x - x3) - y) % _SECP256K1_P)
+
+def _k1_add(P, Q):
+    if P is None: return Q
+    if Q is None: return P
+    x1, y1 = P; x2, y2 = Q
+    if x1 == x2:
+        if (y1 + y2) % _SECP256K1_P == 0: return None
+        return _k1_double(P)
+    lam = (y2 - y1) * pow((x2 - x1) % _SECP256K1_P, -1, _SECP256K1_P) % _SECP256K1_P
+    x3 = (lam * lam - x1 - x2) % _SECP256K1_P
+    return (x3, (lam * (x1 - x3) - y1) % _SECP256K1_P)
+
+def _k1_mul(P, k):
+    R, Q = None, P
+    while k > 0:
+        if k & 1: R = _k1_add(R, Q)
+        Q = _k1_double(Q); k >>= 1
+    return R
+
+def secp256k1_decompress(pk33):
+    """SEC1 compressed (02/03 ‖ x) → (x, y) on secp256k1. Rejects wrong
+    length/prefix, x ≥ p, and x not on the curve. Raises ValueError."""
+    if len(pk33) != 33 or pk33[0] not in (2, 3):
+        raise ValueError("public key must be 33-byte SEC1 compressed (02/03 ‖ x)")
+    x = int.from_bytes(pk33[1:], "big")
+    if x >= _SECP256K1_P:
+        raise ValueError("public key x is not a canonical field element")
+    rhs = (x * x * x + _SECP256K1_B) % _SECP256K1_P
+    y = pow(rhs, (_SECP256K1_P + 1) // 4, _SECP256K1_P)      # p ≡ 3 (mod 4)
+    if y * y % _SECP256K1_P != rhs:
+        raise ValueError("public key x is not on secp256k1")
+    if (y & 1) != (pk33[0] & 1):
+        y = _SECP256K1_P - y
+    return (x, y)
+
+def secp256k1_compress(P):
+    x, y = P
+    return bytes([2 + (y & 1)]) + x.to_bytes(32, "big")
+
+def secp256k1_is_low_s(s):
+    """low-s = s in [1, n/2]. Enforced for issuer_alg 0x04 ONLY (ingestion
+    normalises high-s to n−s before anything is committed); es256 (0x01/0x02)
+    deliberately does NOT enforce it - see the selftest's (r, n−s) check."""
+    return 1 <= s <= _SECP256K1_N // 2
+
+def secp256k1_verify_digest(pub33, digest32, r, s):
+    """ECDSA over secp256k1 against a PRECOMPUTED 32-byte digest. The digest is
+    already double-SHA256 of the Bitcoin message - hashing it again here would
+    verify a different message, so this function never hashes."""
+    Q = secp256k1_decompress(pub33)
+    if not (1 <= r < _SECP256K1_N and 1 <= s < _SECP256K1_N):
+        raise ValueError("r/s out of range [1, n-1]")
+    e = int.from_bytes(_need(digest32, 32, "digest"), "big") % _SECP256K1_N
+    w = pow(s, -1, _SECP256K1_N)
+    u1, u2 = e * w % _SECP256K1_N, r * w % _SECP256K1_N
+    X = _k1_add(_k1_mul(_SECP256K1_G, u1), _k1_mul(Q, u2))
+    if X is None: return False
+    return X[0] % _SECP256K1_N == r
+
+def secp256k1_recover(digest32, header, r, s):
+    """Registration proof of possession: recover the signing key from the
+    65-byte recoverable form header(27..=34) ‖ r ‖ s, ONCE, at registration.
+    Returns the 33-byte compressed key regardless of the header's compression
+    hint; low-s is NOT enforced on this path. Raises ValueError."""
+    if not (27 <= header <= 34):
+        raise ValueError("recovery header must be 27..=34, got %d" % header)
+    if not (1 <= r < _SECP256K1_N and 1 <= s < _SECP256K1_N):
+        raise ValueError("r/s out of range [1, n-1]")
+    recid = (header - 27) & 3
+    x = r + (_SECP256K1_N if recid >= 2 else 0)
+    if x >= _SECP256K1_P:
+        raise ValueError("recovery x is not a canonical field element")
+    rhs = (x * x * x + _SECP256K1_B) % _SECP256K1_P
+    y = pow(rhs, (_SECP256K1_P + 1) // 4, _SECP256K1_P)
+    if y * y % _SECP256K1_P != rhs:
+        raise ValueError("recovery x is not on secp256k1")
+    if (y & 1) != (recid & 1):
+        y = _SECP256K1_P - y
+    e = int.from_bytes(_need(digest32, 32, "digest"), "big") % _SECP256K1_N
+    r_inv = pow(r, -1, _SECP256K1_N)
+    sR = _k1_mul((x, y), s)
+    eG = _k1_mul(_SECP256K1_G, e)
+    neg_eG = None if eG is None else (eG[0], _SECP256K1_P - eG[1])
+    Q = _k1_mul(_k1_add(sR, neg_eG), r_inv)
+    if Q is None:
+        raise ValueError("recovered key is the point at infinity")
+    return secp256k1_compress(Q)
+
+def bitcoin_message_digest(msg):
+    """digest = SHA256(SHA256(0x18 ‖ "Bitcoin Signed Message:\\n" ‖
+    varint(len(msg)) ‖ msg)) - varint is the Bitcoin CompactSize encoding
+    (shared with the §4.2 tx parser). ECDSA verifies THIS digest directly."""
+    return sha256d(BITCOIN_MSG_PREFIX + _enc_varint(len(msg)) + msg)
+
+def wallet_issuance_message(m):
+    return WALLET_MSG_ISSUANCE + _need(m, 32, "m").hex().encode("ascii")
+
+def wallet_cosign_message(m_i):
+    return WALLET_MSG_COSIGN + _need(m_i, 32, "m_i").hex().encode("ascii")
+
+def wallet_registration_message(challenge):
+    return WALLET_MSG_REGISTRATION + _need(challenge, 32, "challenge").hex().encode("ascii")
+
+# ----- 0x10 multi-signature envelope (bundle §12.2 / plan appendix C.2) -----
+class MultisigError(ValueError):
+    """Parse/verify refusal with a stable machine identifier in `.error` (the
+    identifiers match the engine KAT's negative_v2 `error` field)."""
+    def __init__(self, error, detail=""):
+        super().__init__("%s%s" % (error, (": " + detail) if detail else ""))
+        self.error = error
+
+def parse_inner_sig(inner):
+    """Parse ONE inner signature frame of a 0x10 entry. Deliberately a separate
+    function from parse_multisig_s: 0x10 nesting is refused HERE, so the
+    envelope parser structurally cannot recurse. The frame must consume
+    inner_len exactly - leftover bytes inside the inner are refused."""
+    inner = bytes(inner)
+    if not inner:
+        raise MultisigError("truncated", "empty inner_sig")
+    alg = inner[0]
+    if alg == ALG_MULTISIG:
+        raise MultisigError("nested_multisig", "0x10 inside 0x10")
+    if alg == ALG_WALLET_SECP256K1:
+        if len(inner) != 65:
+            raise MultisigError("wallet_sig_length", "0x04 inner must be exactly 65 B, got %d" % len(inner))
+        return {"alg": alg, "rs": inner[1:],
+                "r": int.from_bytes(inner[1:33], "big"), "s": int.from_bytes(inner[33:65], "big")}
+    if alg not in (ALG_WEBAUTHN_ES256, ALG_ES256_PLAIN):
+        raise MultisigError("unknown_inner_alg", "inner alg 0x%02x" % alg)
+    o = 1
+    def take(n, what):
+        nonlocal o
+        if len(inner) - o < n:
+            raise MultisigError("truncated", "inner %s" % what)
+        piece = inner[o:o + n]; o += n
+        return piece
+    out = {"alg": alg}
+    if alg == ALG_WEBAUTHN_ES256:
+        ad_len = int.from_bytes(take(2, "len16(authenticator_data)"), "big")
+        out["authenticator_data"] = take(ad_len, "authenticator_data")
+        cdj_len = int.from_bytes(take(4, "len32(client_data_json)"), "big")
+        out["client_data_json"] = take(cdj_len, "client_data_json")
+    der_len = int.from_bytes(take(2, "len16(signature_der)"), "big")
+    out["signature_der"] = take(der_len, "signature_der")
+    if o != len(inner):
+        raise MultisigError("inner_trailing", "%d byte(s) after the inner frame" % (len(inner) - o))
+    return out
+
+def parse_multisig_s(s):
+    """Strict parser for s = 0x10 ‖ count(1) ‖ [role_len(1) ‖ role ‖ key_id(32)
+    ‖ inner_len(2 BE) ‖ inner]×count. The receiver NEVER re-sorts: the first
+    violation refuses the whole envelope (appendix C.2 rules 1-8). Returns the
+    entry list in wire order."""
+    s = bytes(s)
+    if len(s) > MULTISIG_MAX_LEN:
+        raise MultisigError("too_long", "s is %d B, cap %d" % (len(s), MULTISIG_MAX_LEN))
+    if len(s) < 2 or s[0] != ALG_MULTISIG:
+        raise MultisigError("not_multisig", "s[0] must be 0x10")
+    count = s[1]
+    if not (MULTISIG_MIN_COUNT <= count <= MULTISIG_MAX_COUNT):
+        raise MultisigError("count_out_of_range", "count %d not in 2..=8 (a single signature uses 0x01/0x02/0x04)" % count)
+    o = 2
+    def take(n, what):
+        nonlocal o
+        if len(s) - o < n:
+            raise MultisigError("truncated", what)
+        piece = s[o:o + n]; o += n
+        return piece
+    entries, seen, prev = [], set(), None
+    for i in range(count):
+        role_len = take(1, "role_len")[0]
+        if not (1 <= role_len <= 32):
+            raise MultisigError("bad_role_len", "entry %d role_len %d" % (i, role_len))
+        role_b = take(role_len, "role")
+        try:
+            role = role_b.decode("utf-8")
+        except UnicodeDecodeError:
+            raise MultisigError("unknown_role", "entry %d role is not UTF-8" % i)
+        if role not in ROLE_ORD:
+            raise MultisigError("unknown_role", "entry %d role %r not in the closed vocabulary" % (i, role))
+        kid = take(32, "key_id")
+        inner_len = int.from_bytes(take(2, "inner_len"), "big")
+        inner = take(inner_len, "inner_sig")
+        parsed = parse_inner_sig(inner)
+        if kid in seen:
+            raise MultisigError("duplicate_key_id", "entry %d key_id repeats" % i)
+        key = (ROLE_ORD[role], kid)
+        if prev is not None and key <= prev:
+            raise MultisigError("out_of_order", "entry %d violates strict (role_ord, key_id) ascending order" % i)
+        seen.add(kid); prev = key
+        entry = {"role": role, "role_ord": ROLE_ORD[role], "key_id": kid, "inner": bytes(inner)}
+        entry.update(parsed)
+        entries.append(entry)
+    if o != len(s):
+        raise MultisigError("trailing", "%d trailing byte(s) after entry %d" % (len(s) - o, count))
+    if not any(e["role"] == "issuer" for e in entries):
+        raise MultisigError("no_issuer", "at least one issuer entry is required")
+    return entries
+
+def assemble_multisig_s(entries):
+    """Reassemble s from (role, key_id, inner_sig) triples IN THE GIVEN ORDER.
+    The verifier never sorts - a bundle whose signers[] are mis-ordered
+    reassembles to an s that parse_multisig_s refuses, which is the intent."""
+    if not (1 <= len(entries) <= 255):
+        raise ValueError("entry count out of range")
+    out = [bytes([ALG_MULTISIG, len(entries)])]
+    for role, kid, inner in entries:
+        role_b = role.encode("utf-8")
+        if not (1 <= len(role_b) <= 32):
+            raise ValueError("role must be 1..32 UTF-8 bytes")
+        if len(inner) > 0xffff:
+            raise ValueError("inner_sig longer than a len16 can carry")
+        out.append(bytes([len(role_b)]) + role_b + _need(kid, 32, "key_id")
+                   + len(inner).to_bytes(2, "big") + bytes(inner))
+    return b"".join(out)
+
+def verify_multisig_entry(entry, pub33, m, rp_id=None, origins=None):
+    """Verify ONE parsed 0x10 entry. m_i is recomputed HERE from the PARSED role
+    (never from a side channel), so a re-labelled entry fails with
+    challenge_mismatch even though its bytes parse. Returns (ok, error, reasons);
+    `error` uses the engine KAT identifiers."""
+    m_i = cosign_message(m, entry["role"])
+    alg = entry["alg"]
+    if alg == ALG_WEBAUTHN_ES256:
+        ok, reasons, _facts = webauthn_verify_assertion(
+            pub33, entry["authenticator_data"], entry["client_data_json"],
+            entry["signature_der"], m_i, rp_id, origins)
+        if ok:
+            return True, None, []
+        err = "challenge_mismatch" if any("challenge" in r for r in reasons) else "bad_signature"
+        return False, err, reasons
+    if alg == ALG_ES256_PLAIN:
+        try:
+            ok = p256_verify(pub33, m_i, entry["signature_der"])
+        except ValueError as e:
+            return False, "bad_signature", [str(e)]
+        return (True, None, []) if ok else (False, "bad_signature", ["ES256 over m_i does not verify"])
+    if alg == ALG_WALLET_SECP256K1:
+        if not secp256k1_is_low_s(entry["s"]):
+            return False, "non_low_s", ["s > n/2 - low-s is enforced for 0x04 (normalisation is ingestion's job)"]
+        digest = bitcoin_message_digest(wallet_cosign_message(m_i))
+        try:
+            ok = secp256k1_verify_digest(pub33, digest, entry["r"], entry["s"])
+        except ValueError as e:
+            return False, "bad_signature", [str(e)]
+        return (True, None, []) if ok else (False, "bad_signature", ["secp256k1 ECDSA over the cosign digest does not verify"])
+    return False, "unknown_inner_alg", ["alg 0x%02x" % alg]
+
+# ----- policy grammar gate (bundle §12.1 / plan appendix B) -----
+# policy_jcs/policy_hash above stay untouched: Python's sort_keys is code-point
+# order while RFC 8785 wants UTF-16 code units, but the two only diverge outside
+# the BMP and the key grammar below is ASCII-closed - the risk is extinguished
+# at the grammar, not papered over in the sort.
+POLICY_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+POLICY_REQUIRED_KEYS = ("document_type", "jurisdiction")
+POLICY_MAX_PAIRS = 16
+POLICY_MAX_VALUE_BYTES = 256
+POLICY_MAX_JCS_BYTES = 2048
+
+class PolicyError(ValueError):
+    """Grammar refusal with a stable machine identifier in `.error` (matches the
+    engine KAT's negative_v2 `error` field)."""
+    def __init__(self, error, detail=""):
+        super().__init__("%s%s" % (error, (": " + detail) if detail else ""))
+        self.error = error
+
+def _policy_char_forbidden(cp):
+    # Cc (C0 + DEL + C1) and the bidirectional control characters.
+    return (cp < 0x20 or cp == 0x7F or 0x80 <= cp <= 0x9F
+            or 0x202A <= cp <= 0x202E or 0x2066 <= cp <= 0x2069)
+
+def policy_validate(pairs):
+    """Appendix-B grammar gate over the SUBMITTED pairs (a list of [key, value]
+    in submission order - duplicates are only visible before the dict collapse;
+    a dict is accepted for pre-collapsed input). Raises PolicyError on the first
+    violation; returns the validated policy dict (JCS/hash unchanged elsewhere)."""
+    items = list(pairs.items()) if isinstance(pairs, dict) else [(k, v) for k, v in pairs]
+    if len(items) > POLICY_MAX_PAIRS:
+        raise PolicyError("too_many_pairs", "%d pairs, cap %d" % (len(items), POLICY_MAX_PAIRS))
+    seen = set()
+    for k, v in items:
+        if not isinstance(k, str) or not POLICY_KEY_RE.match(k):
+            raise PolicyError("invalid_key", repr(k))
+        if k in seen:
+            raise PolicyError("duplicate_key", k)          # silent overwrite is refusal, not merging
+        seen.add(k)
+        if not isinstance(v, str):
+            raise PolicyError("invalid_value", "value of %r is not a string" % k)
+        for ch in v:
+            if _policy_char_forbidden(ord(ch)):
+                raise PolicyError("forbidden_char", "U+%04X in the value of %r" % (ord(ch), k))
+        if len(v.encode("utf-8")) > POLICY_MAX_VALUE_BYTES:
+            raise PolicyError("value_too_long", "value of %r is %d B, cap %d" % (k, len(v.encode("utf-8")), POLICY_MAX_VALUE_BYTES))
+    for k in POLICY_REQUIRED_KEYS:
+        if k not in seen:
+            raise PolicyError("missing_required_key", k)
+    policy = dict(items)
+    if len(policy_jcs(policy)) > POLICY_MAX_JCS_BYTES:
+        raise PolicyError("jcs_too_long", "JCS is %d B, cap %d" % (len(policy_jcs(policy)), POLICY_MAX_JCS_BYTES))
+    return policy
+
+def kat_v2_party_checks(vec):
+    """Run every party-model v2 KAT section against the primitives above.
+    Returns [(ok, label)] - shared by --selftest and fixtures/generate.py so the
+    two gates cannot drift. `vec` is the parsed engine KAT copy."""
+    h = bytes.fromhex
+    out = []
+    def check(cond, label):
+        out.append((bool(cond), label))
+    missing = [k for k in ("cosign", "wallet", "multisig", "policy_open",
+                           "es256_plain_alternate_s", "negative_v2") if k not in vec]
+    if missing:
+        check(False, "v2 sections missing from the engine KAT copy: %s (stale fixtures/bc30-v2-vectors.json?)" % ", ".join(missing))
+        return out
+    m = h(vec["m"])
+
+    # cosign - m_i per role + the frozen role_ord table
+    co = vec["cosign"]
+    check(co["tag_utf8"] == COSIGN_TAG.decode("ascii") and h(co["m"]) == m, "v2 cosign - tag + m pinned")
+    for cv in co["vectors"]:
+        mi = cosign_message(m, cv["role"])
+        check(mi.hex() == cv["m_i"] and b64u_encode(mi) == cv["m_i_b64u"]
+              and ROLE_ORD.get(cv["role"]) == cv["role_ord"],
+              "v2 cosign - m_i(%s) + b64u + role_ord %d" % (cv["role"], cv["role_ord"]))
+
+    # wallet - message, double-SHA256 digest, direct-digest ECDSA, key_id, recovery
+    wa = vec["wallet"]
+    pub = h(wa["public_key"])
+    check(wa["curve_id"] == CURVE_SECP256K1, "v2 wallet - curve_id 2 (secp256k1)")
+    check(secp256k1_compress(_k1_mul(_SECP256K1_G, int(wa["priv"], 16))) == pub, "v2 wallet - public_key = compress(priv·G)")
+    msg = wallet_issuance_message(m)
+    check(msg.decode("ascii") == wa["issuance_message_utf8"] and len(msg) == wa["issuance_message_len"],
+          "v2 wallet - issuance message (\"BC30 issuance \" ‖ hex(m), %d B)" % wa["issuance_message_len"])
+    dg = bitcoin_message_digest(msg)
+    check(dg.hex() == wa["issuance_digest"], "v2 wallet - digest = double-SHA256(0x18 ‖ magic ‖ varint ‖ msg)")
+    rs = h(wa["signature_rs"])
+    r_w, s_w = int.from_bytes(rs[:32], "big"), int.from_bytes(rs[32:], "big")
+    check(secp256k1_is_low_s(s_w), "v2 wallet - engine signature is low-s")
+    check(secp256k1_verify_digest(pub, dg, r_w, s_w), "v2 wallet - secp256k1 ECDSA verifies the DIGEST directly")
+    check(not secp256k1_verify_digest(pub, sha256(dg), r_w, s_w), "v2 wallet - a re-hashed digest correctly fails (no library re-hash)")
+    check(wa["s_wallet"] == "04" + wa["signature_rs"] and len(h(wa["s_wallet"])) == 65,
+          "v2 wallet - s (0x04) = 0x04 ‖ r ‖ s, exactly 65 B, no header")
+    check(key_id(CURVE_SECP256K1, pub).hex() == wa["key_id"], "v2 wallet - key_id = SHA256(0x02 ‖ 0x02 ‖ pubkey33)")
+    rmsg = wallet_registration_message(h(wa["registration_challenge"]))
+    check(rmsg.decode("ascii") == wa["registration_message_utf8"] and len(rmsg) == wa["registration_message_len"],
+          "v2 wallet - registration message")
+    rdg = bitcoin_message_digest(rmsg)
+    check(rdg.hex() == wa["registration_digest"], "v2 wallet - registration digest")
+    sig65 = h(wa["registration_sig65"])
+    header, rr, sr = sig65[0], int.from_bytes(sig65[1:33], "big"), int.from_bytes(sig65[33:65], "big")
+    check(header == wa["registration_recovery_header"], "v2 wallet - recovery header %d" % header)
+    check(secp256k1_recover(rdg, header, rr, sr).hex() == wa["recovered_public_key"] == wa["public_key"],
+          "v2 wallet - registration recovery returns the 33 B compressed key")
+    # headers 27..=34 are ONE range: (header−27)&3 picks the point, the
+    # compression hint is ignored - 28 and 32 recover the same key.
+    twin = header - 4 if header >= 31 else header + 4
+    check(secp256k1_recover(rdg, twin, rr, sr) == secp256k1_recover(rdg, header, rr, sr),
+          "v2 wallet - compressed/uncompressed headers (%d/%d) recover the same key" % (header, twin))
+    for bad_h in (26, 35):
+        try:
+            secp256k1_recover(rdg, bad_h, rr, sr)
+            check(False, "v2 wallet - recovery header %d rejected" % bad_h)
+        except ValueError:
+            check(True, "v2 wallet - recovery header %d rejected" % bad_h)
+
+    # multisig - parse, reassemble (both directions), leaf binding, entry verify
+    ms = vec["multisig"]
+    pubmap = {}
+    try:
+        entries = parse_multisig_s(h(ms["s"]))
+    except MultisigError as e:
+        entries = None
+        check(False, "v2 multisig - positive s parses (%s)" % e)
+    if entries is not None:
+        check(len(entries) == ms["count"], "v2 multisig - count %d" % ms["count"])
+        check(assemble_multisig_s([(e["role"], e["key_id"], e["inner"]) for e in entries]).hex() == ms["s"],
+              "v2 multisig - parse → reassemble round-trips byte-for-byte")
+        check(assemble_multisig_s([(t["role"], h(t["key_id"]), h(t["inner_sig"])) for t in ms["entries"]]).hex() == ms["s"],
+              "v2 multisig - s rebuilt from the entry list (the v5 signers[] direction)")
+        li = leaf_input_v2(LEAF_TYPE_ISSUANCE, h(vec["R"]), h(ms["s"]))
+        check(li.hex() == ms["leaf_input"] and leaf_hash(li).hex() == ms["leaf_hash"],
+              "v2 multisig - leaf_input + leaf_hash bind the whole s")
+        for t in ms["entries"]:
+            pubmap[t["key_id"]] = (t["curve_id"], h(t["public_key"]))
+            check(key_id(t["curve_id"], h(t["public_key"])).hex() == t["key_id"],
+                  "v2 multisig - %s key_id re-derives (curve %d)" % (t["role"], t["curve_id"]))
+            check(cosign_message(m, t["role"]).hex() == t["m_i"], "v2 multisig - %s m_i" % t["role"])
+        went = next(t for t in ms["entries"] if t["inner_alg"] == ALG_WALLET_SECP256K1)
+        check(wallet_cosign_message(h(went["m_i"])).decode("ascii") == went["wallet_message_utf8"]
+              and bitcoin_message_digest(wallet_cosign_message(h(went["m_i"]))).hex() == went["wallet_digest"],
+              "v2 multisig - endorser wallet message + digest")
+        for e, t in zip(entries, ms["entries"]):
+            curve, pk = pubmap[e["key_id"].hex()]
+            check(INNER_ALG_CURVE.get(e["alg"]) == curve, "v2 multisig - %s alg 0x%02x ↔ curve_id %d" % (e["role"], e["alg"], curve))
+            ok, err, reasons = verify_multisig_entry(e, pk, m, vec["rp_id"], [vec["origin"]])
+            check(ok, "v2 multisig - %s entry verifies (alg 0x%02x)%s" % (e["role"], e["alg"], "" if ok else " [%s: %s]" % (err, "; ".join(reasons))))
+
+    # es256-plain alternate s - low-s NOT enforced for 0x02 (frozen by this positive)
+    alt = vec["es256_plain_alternate_s"]
+    check(alt["expect"] == "valid" and p256_verify(h(vec["issuer_pub33"]), m, h(alt["signature_der"])),
+          "v2 es256-plain - (r, n−s) re-encoding ACCEPTED (low-s not enforced for 0x01/0x02)")
+
+    # policy_open - grammar gate passes, JCS bytes + hash match
+    for pv in vec["policy_open"]["vectors"]:
+        try:
+            pol = policy_validate(pv["pairs"])
+            jcs = policy_jcs(pol)
+            check(jcs.hex() == pv["jcs_hex"] and jcs.decode("utf-8") == pv["jcs_utf8"]
+                  and sha256(jcs).hex() == pv["policy_hash"],
+                  "v2 policy - %s: grammar ok, JCS bytes + policy_hash" % pv["name"])
+        except PolicyError as e:
+            check(False, "v2 policy - %s unexpectedly refused (%s)" % (pv["name"], e))
+
+    # negative_v2 - all 27 must fail at their declared stage with their identifier
+    neg = vec["negative_v2"]
+    check(len(neg) == 27, "v2 negatives - 27 cases present")
+    def neg_verify_error(sb):
+        if sb[:1] == bytes([ALG_MULTISIG]):
+            try:
+                parsed = parse_multisig_s(sb)
+            except MultisigError as e:
+                return "parse:" + e.error          # oracle says parse must PASS for verify-stage cases
+            for pe in parsed:
+                info = pubmap.get(pe["key_id"].hex())
+                if info is None:
+                    return "unknown_key"
+                ok, err, _r = verify_multisig_entry(pe, info[1], m, vec["rp_id"], [vec["origin"]])
+                if not ok:
+                    return err
+            return None
+        if sb[:1] == bytes([ALG_WALLET_SECP256K1]) and len(sb) == 65:
+            r_n, s_n = int.from_bytes(sb[1:33], "big"), int.from_bytes(sb[33:65], "big")
+            if not secp256k1_is_low_s(s_n):
+                # prove it is the POLICY that rejects: the mirrored scalar verifies
+                if not secp256k1_verify_digest(pub, dg, r_n, _SECP256K1_N - s_n):
+                    return "bad_signature"
+                return "non_low_s"
+            return None if secp256k1_verify_digest(pub, dg, r_n, s_n) else "bad_signature"
+        return "unknown_alg"
+    for nc in neg:
+        want, got = nc["error"], None
+        if nc["stage"] == "parse":
+            try:
+                parse_multisig_s(h(nc["s"]))
+            except MultisigError as e:
+                got = e.error
+        elif nc["stage"] == "policy":
+            try:
+                policy_validate(nc["pairs"])
+            except PolicyError as e:
+                got = e.error
+        elif nc["stage"] == "verify":
+            got = neg_verify_error(h(nc["s"]))
+        check(got == want, "v2 negative - %s fails at %s with %r%s"
+              % (nc["name"], nc["stage"], want, "" if got == want else " (got %r)" % (got,)))
+    return out
+
 # ----- --selftest -----
 # RFC 6979 §A.2.5 "ECDSA, 256 Bits (Prime Field)" - copied from the RFC text
 # (https://www.rfc-editor.org/rfc/rfc6979.txt) and cross-checked against the
@@ -1481,6 +1996,10 @@ def selftest(vectors_path=None):
         ok, reasons, _ = webauthn_verify_assertion(h(vec["subject_pub33"]), h(vec["present_authenticator_data"]), h(vec["present_client_data_json"]),
                                                     h(vec["present_signature_der"]), ch, vec["rp_id"], [vec["origin"]])
         check(ok, "vectors - engine's presentation assertion verifies under subject key" + ("" if ok else " (%s)" % "; ".join(reasons)))
+        # party-model v2 sections (cosign / wallet / multisig / policy_open /
+        # es256_plain_alternate_s / negative_v2) - N0 primitives vs the engine KAT
+        for ok2, label in kat_v2_party_checks(vec):
+            check(ok2, label)
     else:
         _line("skip", "vectors - fixtures/bc30-v2-vectors.json not found (skipped)")
     print()

@@ -436,6 +436,35 @@ def build_presentation(leaf_input, nonce=PRESENT_NONCE, verifier_id=PRESENT_VERI
 # that file with verify.py's builders + this file's RFC 6979 signer and fails on any
 # byte difference; verify.py --selftest and the node checks pin the same file.
 
+def check_v2_party_sections():
+    """Gate generation on the party-model v2 sections of the engine KAT copy
+    (cosign / wallet / multisig / policy_open / es256_plain_alternate_s /
+    negative_v2, bundle-schema.md §12). Runs the same kat_v2_party_checks()
+    that verify.py --selftest runs, so the copy being stale or the primitives
+    drifting aborts generation instead of silently shipping fixtures built on a
+    different frozen spec. Validation ONLY - nothing is generated from these
+    sections yet.
+
+    TODO(N1): generate the bundle v5 fixtures + oracle rows here once the v5
+    pipeline (runV5 / verify_v5, MUST 1-13 of bundle-schema.md §12.6) lands:
+      - positives: multi-signature signers[] (issuer passkey + subject-consent
+        passkey + endorser wallet, appendix C.1 composition), a 0x04 single-sig
+        v5 bundle, a 0x02 high-s positive ((r, n−s) must stay VALID)
+      - negatives (ALL expected exit 1): role relabel, order violation, 0x10
+        nesting, non-low-s 0x04, policy grammar violations, issuer without
+        tl_proof, a half tl_entry/tl_proof pair (both directions), an unknown
+        signers[] field such as sl_proof
+      - warning (expected exit 2): subject-consent key_id != subject_ref
+    N0 deliberately freezes the primitives only; building v5 bundles now would
+    invent wire bytes ahead of the frozen pipeline.
+    """
+    with open(os.path.join(HERE, "bc30-v2-vectors.json"), "r", encoding="utf-8") as f:
+        vec = json.load(f)
+    results = V.kat_v2_party_checks(vec)
+    bad = [label for ok, label in results if not ok]
+    assert not bad, "engine KAT v2 party sections failed:\n  " + "\n  ".join(bad)
+    return len(results)
+
 def v4_expect(rel, bundle, **kw):
     """Run verify.py's pipeline on a fixture and record the oracle row."""
     R = V.verify_v4(bundle, now=FIXTURE_NOW, **kw)
@@ -651,6 +680,9 @@ def jdump(obj):
     return json.dumps(obj, indent=2) + "\n"
 
 def main():
+    # party-model v2 KAT gate (validation only - see check_v2_party_sections)
+    n_v2 = check_v2_party_sections()
+
     # ---- examples/01 - file artifact ----
     b01, _r01 = assemble_bundle(ART_LEAF, file_preimage(), "attestation",
                           {"exchange_id": "demoex", "business_date": "2026-05-28"}, chain=False)
@@ -1070,6 +1102,7 @@ echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"
     print("  v4: leaf_input(none)=%s" % d_none["leaf_input"].hex())
     print("      leaf_input(pubkey)=%s aux=%s" % (d_pk["leaf_input"].hex(), d_pk["aux"].hex()))
     print("      oracle rows: %d (fixtures/v4-expected.json); KAT file is the engine copy, not regenerated" % len(expected))
+    print("  v2 party sections: %d KAT checks green (cosign/wallet/multisig/policy/negatives; v5 fixtures are N1)" % n_v2)
 
 if __name__ == "__main__":
     main()

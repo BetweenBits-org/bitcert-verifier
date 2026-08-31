@@ -1,4 +1,4 @@
-# Proof Bundle Schema - `bitcert-proof-bundle` v1 · v2 · v3 · v4
+# Proof Bundle Schema - `bitcert-proof-bundle` v1 · v2 · v3 · v4 · v5
 
 A **proof bundle** is a single self-contained JSON file. Given the bundle and a
 *public* view of the Bitcoin blockchain, anyone can confirm - **without contacting
@@ -918,3 +918,280 @@ historical `0` / `1`; a v3 bundle with a `zk` section is reported as *undetermin
 Oracle and cross-checks: `fixtures/v4-expected.json` (Python's grade / exit code /
 axes / per-step states), `fixtures/v4-rc-matrix.py` (CLI subprocess exit codes),
 `fixtures/v4-grade-check.mjs` (the shipped browser `runV4` must reproduce every row).
+
+## 12. bundle v5 - role-labelled multi-signature issuance (`bitcert-proof-bundle/v5`)
+
+**v4/v5 boundary.** A bundle is `/v5` as soon as it uses ANY of: the `0x10`
+multi-signature envelope, the `0x04` wallet (secp256k1) issuer signature, or a
+free-key policy (§12.1) beyond the two v4 keys. A single-P-256 issuance with the
+two-key policy stays **v4, byte-identical** - v5 changes nothing behind it.
+Verifiers that predate this section reject `/v5` as an unsupported schema
+(REJECTED, exit 1) - the safe direction, but one that makes deployment notice
+mandatory: ship the verifier before the first v5 bundle exists.
+
+Everything of §2.3 (record `R`, message `m`, `leaf_input`), §3-§4 (Merkle,
+anchor), §9.3 (`aux`) and §11 (grades) carries over unchanged. v5 adds three
+things: an open policy grammar, two new issuer algorithms, and a `signers[]`
+section that replaces `issuer` when more than one party signs.
+
+### 12.1 policy - open key-value object
+
+`preimage.policy` is no longer limited to two keys. The grammar is a hard gate
+(violation ⇒ REJECTED), because `policy_hash` pins whatever bytes were signed -
+the gate is what keeps those bytes displayable and unambiguous:
+
+- **Required keys**: `document_type`, `jurisdiction`. Absence is refusal - an
+  empty policy would defeat post-issuance document-type relabel protection.
+- **Key grammar**: `^[a-z][a-z0-9_]{0,31}$`, at most **16** pairs. Keys are
+  ASCII-closed on purpose: RFC 8785 sorts by UTF-16 code units while some
+  implementations sort by code point, and the two orders only diverge outside
+  the BMP - closing keys to ASCII extinguishes the divergence instead of
+  trusting four implementations to agree.
+- **Values**: UTF-8 strings only, at most **256 bytes** each; control characters
+  (Unicode category Cc: C0, DEL, C1) and the bidirectional control characters
+  (U+202A..U+202E, U+2066..U+2069) are refused; the whole JCS is at most
+  **2048 bytes**. **Duplicate keys are refused** (a silent last-wins overwrite
+  would let two readers see two different policies under one hash).
+- Customer keys carry the `x_` prefix; un-prefixed new keys are reserved.
+  `content_author_type` values (`display_name` · `business_no` · `org_uuid` ·
+  `did` · `url`) are display vocabulary, not closed by the verifier.
+- NFC normalisation is the producer's job (same precedent as wallet low-s
+  normalisation): the hash pins exact bytes, the verifier does not re-normalise.
+- Rendering policy values in a UI MUST HTML-escape them (they are attacker-
+  chosen strings under a valid signature).
+
+`policy_hash = SHA-256(JCS(policy))` is unchanged.
+
+### 12.2 the `0x10` multi-signature envelope
+
+```
+m_i = SHA-256( "BC30/cosign/v1" ‖ m ‖ role_len(1) ‖ role_utf8 )
+s   = 0x10 ‖ count(1) ‖ [ role_len(1) ‖ role_utf8 ‖ key_id(32) ‖ inner_len(2 BE) ‖ inner_sig ] × count
+```
+
+**Every entry signs its own `m_i` - the first entry included.** The role lives
+inside the signed message, so a collected signature cannot be re-labelled into a
+different role by whoever assembles `s` (the "commit it inside `m`" principle
+this schema already uses for `subject_type` and `policy_hash`, §2.3). No entry
+signs the bare `m`: a single exception would re-open cross-use between the
+single-signature algorithms and `0x10` entries.
+
+**Roles** are a CLOSED vocabulary. `role_ord` is a sort-only constant - it never
+appears on the wire:
+
+| `role_ord` | role | organisation key | `tl_proof` |
+|---|---|---|---|
+| 0 | `issuer` | required (requesting org) | REQUIRED |
+| 1 | `co-issuer` | required (may be another org) | REQUIRED |
+| 2 | `subject-consent` | not required | optional |
+| 3 | `endorser` | not required | optional |
+
+A role outside this table is refused - an open list would let an undefined role
+dodge the `tl_proof` requirement. Extending the vocabulary changes what is
+signed (`m_i` commits the role), so it requires a schema major bump, never a
+silent addition.
+
+**Per-algorithm signing target**: `0x01` (webauthn-es256) signs with
+`challenge == base64url(m_i)`; `0x02` (es256-plain) signs `m_i` directly;
+`0x04` (wallet) signs `msg = "BC30 cosign " ‖ lowercase_hex(m_i)` (§12.3).
+low-s is enforced for `0x04` ONLY: WebAuthn authenticators do not guarantee it
+for `0x01`, and enforcing it retroactively on `0x02` would turn already-anchored
+high-s records into permanent rejections (the KAT pins an accepted `(r, n−s)`
+es256-plain positive for exactly this reason).
+
+**Strict parse rules** - the receiver NEVER re-sorts; the first violation
+refuses the whole `s`:
+
+1. `count` in `2..=8`. `count == 1` is refused (a single signature uses
+   `0x01`/`0x02`/`0x04`).
+2. At least one `issuer` entry (several = joint issuance).
+3. `key_id` unique across ALL entries, no exceptions.
+4. Entries in strictly ascending `(role_ord, key_id)` order.
+5. `role_len` in `1..=32`, closed vocabulary.
+6. Inner algorithms `0x01`/`0x02`/`0x04` only; **`0x10` nesting is refused**
+   (parse the inner frame with a function that structurally cannot recurse).
+7. `inner_len` must be consumed exactly - no surplus bytes inside an inner
+   frame; a `0x04` inner is exactly 65 bytes.
+8. The whole `s` is at most **8192 bytes** (this cap applies to `0x10` only).
+
+**What uniqueness honestly covers**: parsing is deterministic and no re-sort or
+re-label can produce a second valid byte string for the same signature set; but
+P-256 low-s cannot be enforced (rule above), so `leaf_input` commits to the
+SUBMITTED byte string, not to an abstract signature set - exactly as in v4.
+And `0x10` proves no forgery, not completeness: the assembler can omit a
+collected signature. Omission-proofing would need a second pass over a signed
+signer-list digest and is out of scope.
+
+### 12.3 wallet issuer signature (`issuer_alg 0x04`, `curve_id 2`)
+
+```
+curve_id 2 = secp256k1 (1 = P-256)
+s      = 0x04 ‖ r(32) ‖ s(32)                          - exactly 65 B, no length prefix, no recovery header
+msg    = "BC30 issuance "        ‖ lowercase_hex(m)     (single signature, 78 chars)
+       | "BC30 cosign "          ‖ lowercase_hex(m_i)   (0x10 entry,        76 chars)
+       | "BC30 key registration " ‖ lowercase_hex(challenge)   (registration proof of possession)
+digest = SHA-256( SHA-256( 0x18 ‖ "Bitcoin Signed Message:\n" ‖ varint(len(msg)) ‖ msg ) )
+```
+
+- `varint` is the Bitcoin CompactSize encoding (§4.2 already implements it).
+- **ECDSA verifies the `digest` DIRECTLY.** The message scheme hashes twice by
+  itself; a library that hashes its input again verifies a different message.
+  The KAT pins a re-hashed-digest failure to catch exactly this mistake.
+- **No recovery header in `s`**: ingestion verifies against the registered key
+  and stores `r ‖ s` only, so one signature has one encoding.
+- **low-s is enforced**: `s > n/2` is refused. Normalising a wallet's high-s to
+  `n − s` is ingestion's job, before anything is committed; both scalars must be
+  in `[1, n−1]`.
+- **Registration** uses the 65-byte recoverable form `header(1) ‖ r(32) ‖ s(32)`
+  with `header` accepted across the whole `27..=34` range (the compression hint
+  in the header is ignored; recovery id = `(header − 27) & 3`). The key is
+  recovered ONCE at registration and returned/stored as the 33-byte SEC1
+  compressed key; low-s is NOT enforced on this path.
+- The domain tags above are mandatory: an untagged signature could be replayed
+  from another protocol, and a wallet user could not tell what they are signing.
+- First revision supports P2WPKH keys only (taproot's tweaked x-only output keys
+  are incompatible with legacy recovery; BIP-322 is a later decision).
+
+### 12.4 `signers[]` - the multi-signature section
+
+When `s` is the `0x10` envelope, the bundle carries `signers[]` INSTEAD of the
+§9.1 `issuer` section, and `aux` carries NO `tl_entry`/`tl_proof` (each signer
+brings their own). One array entry per `0x10` entry, in the same order:
+
+```jsonc
+"signers": [
+  {
+    "role": "issuer",                       // closed vocabulary of §12.2
+    "alg": "webauthn-es256",                // "webauthn-es256" | "es256-plain" | "wallet-secp256k1"
+    "curve_id": 1,                          // es256 family ⇒ 1, wallet-secp256k1 ⇒ 2
+    "public_key": "….(66 hex = 33 B)",     // SEC1 compressed
+    "key_id": "….(64 hex)",                // SHA-256(0x02 ‖ curve_id ‖ public_key) - RECOMPUTED
+    "rp_id": "console.bitcert.io",          // webauthn only; a CLAIM (§10.1 pin applies)
+    "assertion": { /* per alg, below */ },
+    "tl_entry": { /* §9.3 shape */ },       // optional pair with tl_proof - see MUST 2
+    "tl_proof": { "leaf_index": 0, "siblings": [], "directions": [] }
+  }
+]
+```
+
+`assertion` per `alg`: `webauthn-es256` carries `authenticator_data` +
+`client_data_json` + `signature_der` (hex, exact bytes); `es256-plain` carries
+`signature_der`; `wallet-secp256k1` carries `signature_rs` (**128 hex** = the
+64-byte `r ‖ s`, wallet only). The fields listed here are the ONLY fields a
+`signers[]` entry may carry. There is deliberately NO per-signer `sl_proof`:
+the status list is keyed by `leaf_input` (record revocation), so a per-signer
+proof cannot exist - record revocation stays `aux.sl_proof`, singular.
+
+### 12.5 reassembly model
+
+The bundle does NOT carry `s` whole - exactly as in v4 (§9.1), the verifier
+reassembles it so there is a single source of truth:
+
+```
+inner_sig_i = 0x01 ‖ len16(authenticator_data) ‖ authenticator_data
+                   ‖ len32(client_data_json) ‖ client_data_json
+                   ‖ len16(signature_der) ‖ signature_der            (webauthn-es256)
+            | 0x02 ‖ len16(signature_der) ‖ signature_der            (es256-plain)
+            | 0x04 ‖ r(32) ‖ s(32)                                   (wallet-secp256k1)
+
+s = 0x10 ‖ count ‖ [ role_len ‖ role ‖ key_id ‖ inner_len(2 BE) ‖ inner_sig ] × count
+    count = signers.length; role and key_id are taken from signers[i] IN ARRAY ORDER
+```
+
+All scalars (`count`, `role_len`, `len16`, `len32`, `inner_len`) are unsigned
+big-endian; empty fields are refused. The verifier never sorts: a mis-ordered
+`signers[]` reassembles into an `s` that the §12.2 parse rules refuse, which is
+the intended failure.
+
+### 12.6 verifier obligations (MUST, 13 items)
+
+1. **Reassemble** `s` by §12.5.
+2. **Shape**: the §12.2 parse rules (count `2..=8`, strict `(role_ord, key_id)`
+   ascending, unique `key_id`, closed roles, exact `inner_len`, no surplus,
+   8 KB). `tl_entry` and `tl_proof` are BOTH present or BOTH absent - one
+   without the other is refused. A `signers[]` entry carrying any field outside
+   the §12.4 list (`sl_proof` included) is refused.
+3. **alg ↔ curve**: es256 family ⇒ `curve_id 1`, wallet ⇒ `curve_id 2`.
+   Mismatch is refused.
+4. **Entry self-binding**: recompute `key_id == SHA-256(0x02 ‖ curve_id ‖
+   public_key)`. Mismatch is refused.
+5. **`tl_entry` binding**: when present, its `key_id`, `public_key` and
+   `curve_id` must ALL equal the entry's. (Without this, a foreign
+   `tl_entry`+`tl_proof` could be pasted in to render someone else's key as
+   "an organisation key".)
+6. **Signatures**: recompute each entry's `m_i` from the role PARSED OUT OF
+   `s`, then verify the `assertion` per §12.2. The verification key is
+   `tl_entry.public_key` when a `tl_entry` is present, else the entry's
+   `public_key` (new in v5 - v4 had no fallback; the safety argument is not the
+   v4 precedent but that `key_id` sits inside `s`, hence inside the anchored
+   `leaf_input`, and MUST 4 re-binds the public key to it).
+7. **Trust list**: rebuild `tl_entry` bytes, fold `tl_proof`, compare against
+   the `aux` `TL_root`. ALL proven entries fold to the SAME `TL_root` - the
+   trust list is one platform-wide tree; the organisation lives in
+   `tl_entry.issuer_id`. A folding `tl_proof` proves LISTING only; the
+   organisation's approval of THIS record is proven only by the `m_i` signature.
+8. **Key validity**: for every proven `tl_entry`, judge
+   `valid_from`/`valid_to`/`revoked_at` at the anchor `block_time` (§11 step 12
+   semantics, per signer).
+9. **`tl_proof` requirement**: an `issuer` or `co-issuer` entry without one is
+   refused.
+10. **Record revocation**: `aux.sl_proof` exactly as in v4 (§11 step 15).
+11. **Policy grammar**: a §12.1 violation is refused.
+12. **Anchor binding**: reassembled `s` → `leaf_input` → Merkle → anchor
+    output payload - the v4 chain (§11 steps 6-8) over the v5 `s`.
+13. **Subject binding**: when `subject_type == 0x02` and a `subject-consent`
+    entry exists, compare its `key_id` against `subject_ref`. A mismatch is NOT
+    a rejection: report "not the subject's own consent" and grade WARNING.
+
+What actually stops re-labelling and re-ordering is 12 plus `m_i` - editing the
+JSON changes the reassembled `s`, and the Merkle no longer folds. Items 2-5 are
+early checks so the failure is NAMED instead of surfacing as a bare root
+mismatch.
+
+### 12.7 grades for invalid keys
+
+| situation | grade |
+|---|---|
+| `issuer`/`co-issuer` key invalid or revoked at block time | REJECTED |
+| `subject-consent`/`endorser` key invalid or revoked | WARNING (flag that entry; verdict stands) |
+| entry without `tl_entry`/`tl_proof` | VALID (display "unlisted key - revocation not provable", nothing more) |
+| record revoked via `aux.sl_proof` | REJECTED |
+
+### 12.8 one canonical envelope
+
+A v5 bundle has exactly one shape per signature form; mixtures and duplicates
+are refused:
+
+```
+signers[] present  ⇔  no issuer section  ⇔  no aux.tl_entry / aux.tl_proof  ⇔  reassembled s[0] == 0x10
+```
+
+A **single** `0x04` wallet signature is a v5 bundle WITHOUT `signers[]`: it
+keeps the v4 pipeline and the §9.1 `issuer` section (with
+`assertion.signature_rs`, `alg "wallet-secp256k1"`, `curve_id 2`) and
+additionally applies MUST 3, 11 and 12; a low-s violation is refused.
+
+Reserved and refused (placeholders, not implemented): `subject_type 0x03`
+(participant-set Merkle root), `issuer_alg 0x03` (BIP-340 Schnorr). A verifier
+MUST refuse them rather than guess.
+
+### 12.9 fixtures and expected grades
+
+Known answers for every §12 primitive live in the engine KAT copy
+`fixtures/bc30-v2-vectors.json`, sections `cosign`, `wallet`, `multisig`,
+`policy_open`, `es256_plain_alternate_s` and `negative_v2` (27 refusal cases,
+each naming its stage - parse / verify / policy - and its error identifier).
+`verify-cli/verify.py --selftest` and `fixtures/multisig/kat.mjs` both replay
+all of them; `fixtures/generate.py` refuses to generate on any drift.
+
+v5 BUNDLE fixtures (to land with the v5 pipeline) grade as:
+
+- **negative → REJECTED (exit 1)**, all of: role relabel · order violation ·
+  `0x10` nesting · non-low-s `0x04` · policy grammar violation · `issuer`
+  without `tl_proof` · `tl_entry` without `tl_proof` and vice versa · a
+  `signers[]` entry with an unknown field such as `sl_proof`.
+- **positive → VALID (exit 0)**: a high-s `0x02` signature, `(r, n−s)`
+  included, stays valid.
+- **warning → exit 2**: `subject-consent` `key_id != subject_ref` (MUST 13).
+
+The verifier grade scale is unchanged: `0` valid · `1` rejected · `2` warning.

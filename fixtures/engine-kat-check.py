@@ -34,11 +34,16 @@ import generate as G    # noqa: E402  (imports its RFC 6979 signer; main() is no
 
 VECTORS = os.path.join(HERE, "bc30-v2-vectors.json")
 DEFAULT_ENGINE = os.path.join(HERE, "..", "..", "ann-core", "crates", "bc30-leaf", "tests", "vectors", "bc30-v2-kat.json")
-# SHA-256 of the canonical engine file (ann-core feat/bc30-v31-identity-bound, 2026-08-25).
-# Asserted on the committed copy ALWAYS - so CI, which has no ann-core checkout, still
-# proves the copy is the canonical bytes. Bump only when the engine deliberately re-cuts
-# its vectors (and re-copy the file).
-CANONICAL_SHA256 = "4e54c4bcc09e08d0d43113c97b7bf0948572df38765f25729046ec86d4fb0bac"
+# SHA-256 of the canonical engine file (ann-core feat/party-model-redesign, 2026-08-31:
+# the engine re-cut the vectors ADDITIVELY - sections cosign / wallet / multisig /
+# policy_open / es256_plain_alternate_s / negative_v2; every pre-existing field is
+# byte-identical). Asserted on the committed copy ALWAYS - so CI, which has no
+# ann-core checkout, still proves the copy is the canonical bytes. Bump only when
+# the engine deliberately re-cuts its vectors (and re-copy the file).
+# The new sections are exercised by verify.py --selftest (kat_v2_party_checks),
+# fixtures/generate.py and fixtures/multisig/kat.mjs; this script keeps re-deriving
+# the original per-field surface.
+CANONICAL_SHA256 = "ec36c41f344d812e421e563c9cd5fa2eab6b37bb5cbcee4f53965c28899ea112"
 
 rows = []
 def cmp(field, ours, theirs, note=""):
