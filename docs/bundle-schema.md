@@ -1184,7 +1184,11 @@ each naming its stage - parse / verify / policy - and its error identifier).
 `verify-cli/verify.py --selftest` and `fixtures/multisig/kat.mjs` both replay
 all of them; `fixtures/generate.py` refuses to generate on any drift.
 
-v5 BUNDLE fixtures (to land with the v5 pipeline) grade as:
+v5 BUNDLE fixtures live in `fixtures/v5/` with their oracle
+`fixtures/v5-expected.json` (written by `fixtures/generate.py` from
+`verify.py::verify_v5`); `fixtures/v5-rc-matrix.py` re-runs the CLI per row and
+`fixtures/v5-grade-check.mjs` replays the browser `runV5` against every grade,
+axis and step. They grade as:
 
 - **negative → REJECTED (exit 1)**, all of: role relabel · order violation ·
   `0x10` nesting · non-low-s `0x04` · policy grammar violation · `issuer`

@@ -194,6 +194,88 @@ def main():
     np_ = V.parse_presentation_blob(V.b64u_encode(json.dumps(blob).encode()))
     cmp("presentation blob (base64url JSON) parses back to the engine bytes", (np_["authenticator_data"] + np_["client_data_json"] + np_["signature"]).hex(), (pad + pcdj + psig).hex())
 
+    # ---- v5 party sections (schema §12): wallet 0x04, cosign m_i, 0x10 multisig,
+    # ---- open policy, alternate-s. Everything is RE-DERIVED from the inputs -
+    # ---- the secp256k1 RFC 6979 signer must reproduce the Rust engine's bytes.
+    wa = E["wallet"]
+    wpriv = int.from_bytes(V.sha256(wa["seed"].encode()), "big") % V._SECP256K1_N
+    cmp("wallet.priv = SHA256(seed) mod n", "%064x" % wpriv, wa["priv"])
+    cmp("wallet.public_key = compress(priv·G)", G.k1_pub33(wpriv).hex(), wa["public_key"])
+    cmp("wallet.key_id = SHA256(0x02 ‖ 0x02 ‖ pub33)", V.key_id(V.CURVE_SECP256K1, G.k1_pub33(wpriv)).hex(), wa["key_id"])
+    cmp("wallet.curve_id", wa["curve_id"], V.CURVE_SECP256K1)
+    cmp("wallet.issuance_message = tag ‖ lowercase_hex(m)", V.wallet_issuance_message(m).decode("ascii"), wa["issuance_message_utf8"])
+    cmp("wallet.issuance_digest (Bitcoin signed-message scheme, double-SHA256)",
+        V.bitcoin_message_digest(V.wallet_issuance_message(m)).hex(), wa["issuance_digest"])
+    cmp("wallet.signature_rs (re-signed: RFC 6979 secp256k1, low-s)", G.wallet_sign_rs(wpriv, h(wa["issuance_digest"])).hex(), wa["signature_rs"])
+    cmp("wallet.s_wallet = 0x04 ‖ r ‖ s", "04" + wa["signature_rs"], wa["s_wallet"])
+    _wr, _ws = int(wa["signature_rs"][:64], 16), int(wa["signature_rs"][64:], 16)
+    cmp("wallet signature verifies digest-DIRECT (verify.py)",
+        "ok" if V.secp256k1_verify_digest(h(wa["public_key"]), h(wa["issuance_digest"]), _wr, _ws) else "FAIL", "ok")
+    cmp("wallet.signature_rs is low-s", V.secp256k1_is_low_s(_ws), True)
+    wli = V.leaf_input_v2(E["leaf_type"], R, h(wa["s_wallet"]))
+    cmp("wallet.leaf_input", wli.hex(), wa["leaf_input"])
+    cmp("wallet.leaf_hash", V.leaf_hash(wli).hex(), wa["leaf_hash"])
+    cmp("wallet.registration_message = tag ‖ lowercase_hex(challenge)",
+        V.wallet_registration_message(h(wa["registration_challenge"])).decode("ascii"), wa["registration_message_utf8"])
+    cmp("wallet.registration_digest", V.bitcoin_message_digest(V.wallet_registration_message(h(wa["registration_challenge"]))).hex(), wa["registration_digest"])
+    cmp("wallet.registration_sig65 (re-signed recoverable, header 31 + recid)",
+        G.wallet_sign_recoverable(wpriv, h(wa["registration_digest"])).hex(), wa["registration_sig65"])
+    _s65 = h(wa["registration_sig65"])
+    cmp("wallet.registration_recovery_header", _s65[0], wa["registration_recovery_header"])
+    cmp("wallet.recovered_public_key (verify.py recovery)",
+        V.secp256k1_recover(h(wa["registration_digest"]), _s65[0], int.from_bytes(_s65[1:33], "big"), int.from_bytes(_s65[33:65], "big")).hex(),
+        wa["recovered_public_key"])
+
+    co = E["cosign"]
+    cmp("cosign.m is the record m", co["m"], E["m"])
+    cmp("cosign.tag", co["tag_utf8"], "BC30/cosign/v1")
+    for cv in co["vectors"]:
+        mi = V.cosign_message(m, cv["role"])
+        cmp("cosign.m_i (%s)" % cv["role"], mi.hex(), cv["m_i"])
+        cmp("cosign.m_i_b64u (%s)" % cv["role"], V.b64u_encode(mi), cv["m_i_b64u"])
+        cmp("cosign.role_ord (%s)" % cv["role"], V.ROLE_ORD[cv["role"]], cv["role_ord"])
+
+    ms = E["multisig"]
+    triples = []
+    for i, en in enumerate(ms["entries"]):
+        mi = V.cosign_message(m, en["role"])
+        cmp("multisig[%d].m_i (%s)" % (i, en["role"]), mi.hex(), en["m_i"])
+        if en["inner_alg"] == V.ALG_WEBAUTHN_ES256:
+            priv = {"issuer": ipriv, "subject-consent": spriv}[en["role"]]
+            r_ad, r_cdj, r_sig = G.build_assertion(priv, E["rp_id"], E["origin"], mi, uv=True, sign_count=en["sign_count"])
+            cmp("multisig[%d].authenticator_data (rebuilt)" % i, r_ad.hex(), en["authenticator_data"])
+            cmp("multisig[%d].client_data_json (rebuilt)" % i, r_cdj.hex(), en["client_data_json"])
+            cmp("multisig[%d].signature_der (re-signed)" % i, r_sig.hex(), en["signature_der"])
+            inner = V.issuer_sig_bytes(V.ALG_WEBAUTHN_ES256, r_sig, r_ad, r_cdj)
+        else:
+            wd = V.bitcoin_message_digest(V.wallet_cosign_message(mi))
+            cmp("multisig[%d].wallet_message" % i, V.wallet_cosign_message(mi).decode("ascii"), en["wallet_message_utf8"])
+            cmp("multisig[%d].wallet_digest" % i, wd.hex(), en["wallet_digest"])
+            cmp("multisig[%d].signature_rs (re-signed)" % i, G.wallet_sign_rs(wpriv, wd).hex(), en["signature_rs"])
+            inner = h("04" + en["signature_rs"])
+        cmp("multisig[%d].inner_sig (reassembled §12.5)" % i, inner.hex(), en["inner_sig"])
+        cmp("multisig[%d].key_id recomputes" % i, V.key_id(en["curve_id"], h(en["public_key"])).hex(), en["key_id"])
+        triples.append((en["role"], h(en["key_id"]), inner))
+    s10 = V.assemble_multisig_s(triples)
+    cmp("multisig.count", ms["count"], len(ms["entries"]))
+    cmp("multisig.s (reassembled 0x10 envelope)", s10.hex(), ms["s"])
+    li10 = V.leaf_input_v2(E["leaf_type"], R, s10)
+    cmp("multisig.leaf_input", li10.hex(), ms["leaf_input"])
+    cmp("multisig.leaf_hash", V.leaf_hash(li10).hex(), ms["leaf_hash"])
+    cmp("multisig.s parses strictly (verify.py)", len(V.parse_multisig_s(s10)), len(ms["entries"]))
+
+    for pv in E["policy_open"]["vectors"]:
+        pol = V.policy_validate(pv["pairs"])
+        cmp("policy_open[%s].jcs" % pv["name"], V.policy_jcs(pol).hex(), pv["jcs_hex"])
+        cmp("policy_open[%s].jcs_utf8" % pv["name"], V.policy_jcs(pol).decode("utf-8"), pv["jcs_utf8"])
+        cmp("policy_open[%s].policy_hash" % pv["name"], V.policy_hash(pol).hex(), pv["policy_hash"])
+
+    alt = E["es256_plain_alternate_s"]
+    _ar, _as = V.der_to_rs(h(E["signature_der_plain"]))
+    cmp("es256_plain_alternate_s (re-encoded (r, n−s) DER)", V.rs_to_der(_ar, V._P256_N - _as).hex(), alt["signature_der"])
+    cmp("es256_plain_alternate_s verifies (low-s NOT enforced for 0x02)",
+        "ok" if V.p256_verify(h(E["issuer_pub33"]), m, h(alt["signature_der"])) else "FAIL", "ok")
+
     bad = [r for r in rows if not r[1]]
     print("engine KAT cross-check - %d fields, %d mismatch(es)\n" % (len(rows), len(bad)))
     for field, ok, ours, theirs, note in rows:

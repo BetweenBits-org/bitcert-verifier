@@ -1833,6 +1833,12 @@ const OP_RETURN_V30_VERSION=0x1E, OP_RETURN_V31_VERSION=0x1F;
 const FLAG_WITNESS_PRESENT=0b01, FLAG_IDENTITY_BOUND=0b10, FLAGS_DEFINED_MASK_V31=0b11;
 const SUBJECT_NONE=0, SUBJECT_ID_HASH=1, SUBJECT_PUBKEY=2, CURVE_P256=1, LEAF_TYPE_ISSUANCE=1;
 const ALG_WEBAUTHN_ES256=1, ALG_ES256_PLAIN=2, ALG_NAMES={"webauthn-es256":1,"es256-plain":2};
+/* v5 (schema §12): wallet issuer alg + the closed alg↔curve map (MUST 3). */
+const ALG_WALLET_SECP256K1=4, CURVE_SECP256K1=2, SCHEMA_V5="bitcert-proof-bundle/v5";
+const ALG_NAMES_V5={"webauthn-es256":1,"es256-plain":2,"wallet-secp256k1":4};
+const ALG_CURVE_V5={"webauthn-es256":1,"es256-plain":1,"wallet-secp256k1":2};
+function walletIssuanceMessage(m){ return TXT("BC30 issuance "+bytesToHex(m)); }
+function walletCosignMessage(mi){ return TXT("BC30 cosign "+bytesToHex(mi)); }
 
 function isUint(v){ return Number.isInteger(v) && v>=0; }
 function u64be(v){
@@ -1859,6 +1865,34 @@ function policyJcs(policy){
   return jcsObj(policy);
 }
 async function policyHash(policy){ return sha256(TXT(policyJcs(policy))); }
+/* §12.1 policy grammar gate (v5 - MUST 11). The hash pins whatever bytes were
+   signed; the gate keeps those bytes displayable and unambiguous. Mirrors
+   verify.py::policy_validate, error ids included. */
+const POLICY_KEY_RE=/^[a-z][a-z0-9_]{0,31}$/;
+const POLICY_REQUIRED_KEYS=["document_type","jurisdiction"];
+const POLICY_MAX_PAIRS=16, POLICY_MAX_VALUE_BYTES=256, POLICY_MAX_JCS_BYTES=2048;
+function policyCharForbidden(cp){
+  return cp<0x20||cp===0x7F||(cp>=0x80&&cp<=0x9F)||(cp>=0x202A&&cp<=0x202E)||(cp>=0x2066&&cp<=0x2069);
+}
+function policyValidate(pairs){
+  const items=Array.isArray(pairs)?pairs.map(p=>[p[0],p[1]]):Object.entries(pairs);
+  if(items.length>POLICY_MAX_PAIRS) throw msError("too_many_pairs", items.length+" pairs, cap "+POLICY_MAX_PAIRS);
+  const seen=new Set();
+  for(const [k,v] of items){
+    if(typeof k!=="string"||!POLICY_KEY_RE.test(k)) throw msError("invalid_key", JSON.stringify(k));
+    if(seen.has(k)) throw msError("duplicate_key", k);          // silent overwrite is refusal, not merging
+    seen.add(k);
+    if(typeof v!=="string") throw msError("invalid_value", "value of "+JSON.stringify(k)+" is not a string");
+    for(const ch of v){ const cp=ch.codePointAt(0);
+      if(policyCharForbidden(cp)) throw msError("forbidden_char", "U+"+cp.toString(16).toUpperCase().padStart(4,"0")+" in the value of "+JSON.stringify(k)); }
+    const vb=TXT(v).length;
+    if(vb>POLICY_MAX_VALUE_BYTES) throw msError("value_too_long", "value of "+JSON.stringify(k)+" is "+vb+" B, cap "+POLICY_MAX_VALUE_BYTES);
+  }
+  for(const k of POLICY_REQUIRED_KEYS) if(!seen.has(k)) throw msError("missing_required_key", k);
+  const policy={}; for(const [k,v] of items) policy[k]=v;
+  if(TXT(policyJcs(policy)).length>POLICY_MAX_JCS_BYTES) throw msError("jcs_too_long", "JCS over "+POLICY_MAX_JCS_BYTES+" B");
+  return policy;
+}
 function recordCore(salt, doc, st, ref, issuedAt, expiresAt, ph){
   if(![0,1,2].includes(st)) throw new Error("subject_type must be 0/1/2");
   return concat(need(salt,16,"record_salt"), need(doc,32,"doc_sha256"), Uint8Array.of(st), need(ref,32,"subject_ref"),
@@ -1968,6 +2002,9 @@ const STATE_GRADE={ok:"valid", skip:"valid", warn:"warning", undet:"undetermined
 function reduceGrade(states){ let w=0; for(const s of states) w=Math.max(w, GRADES.indexOf(STATE_GRADE[s])); return GRADES[w]; }
 
 function v4SchemaProblems(b){
+  // Serves v4 AND single-signature v5 (schema §12.8): v5 additionally admits
+  // the wallet-secp256k1 issuer alg and curve_id 2. v4 behaviour is frozen.
+  const v5=b.schema===SCHEMA_V5;
   const p=[]; const isObj=x=>x&&typeof x==="object"&&!Array.isArray(x);
   const tryHex=(h,n,what)=>{ try{ hexb(h,n,what); }catch(e){ p.push(e.message); } };
   for(const k of ["record","merkle","anchor","issuer","aux"]) if(!isObj(b[k])) p.push("missing section \""+k+"\"");
@@ -1994,16 +2031,24 @@ function v4SchemaProblems(b){
   if(st===SUBJECT_PUBKEY){
     const sub=b.subject;
     if(!isObj(sub)) p.push("subject section required for subject_type 2");
-    else { if(sub.curve_id!==CURVE_P256) p.push("subject.curve_id must be 1 (P-256)"); tryHex(sub.public_key,33,"subject.public_key"); }
+    else {
+      if(v5){ if(![CURVE_P256,CURVE_SECP256K1].includes(sub.curve_id)) p.push("subject.curve_id must be 1 (P-256) or 2 (secp256k1)"); }
+      else if(sub.curve_id!==CURVE_P256) p.push("subject.curve_id must be 1 (P-256)");
+      tryHex(sub.public_key,33,"subject.public_key");
+    }
   }
   const iss=b.issuer;
   tryHex(iss.issuer_id,16,"issuer.issuer_id"); tryHex(iss.key_id,32,"issuer.key_id");
-  if(!Object.prototype.hasOwnProperty.call(ALG_NAMES, iss.alg)) p.push("issuer.alg must be webauthn-es256 | es256-plain");
+  if(v5){ if(!Object.prototype.hasOwnProperty.call(ALG_NAMES_V5, iss.alg)) p.push("issuer.alg must be webauthn-es256 | es256-plain | wallet-secp256k1"); }
+  else if(!Object.prototype.hasOwnProperty.call(ALG_NAMES, iss.alg)) p.push("issuer.alg must be webauthn-es256 | es256-plain");
   const asn=iss.assertion;
   if(!isObj(asn)) p.push("issuer.assertion missing");
   else {
-    const needK = iss.alg==="es256-plain" ? ["signature_der"] : ["authenticator_data","client_data_json","signature_der"];
-    for(const k of needK){ const v=asn[k]; if(typeof v!=="string"||!v||v.length%2||!/^[0-9a-fA-F]*$/.test(v)) p.push("issuer.assertion."+k+" must be hex"); }
+    const needK = (v5&&iss.alg==="wallet-secp256k1") ? ["signature_rs"]
+                : iss.alg==="es256-plain" ? ["signature_der"] : ["authenticator_data","client_data_json","signature_der"];
+    for(const k of needK){ const v=asn[k];
+      if(typeof v!=="string"||!v||v.length%2||!/^[0-9a-fA-F]*$/.test(v)) p.push("issuer.assertion."+k+" must be hex");
+      else if(k==="signature_rs"&&v.length!==128) p.push("issuer.assertion.signature_rs must be 128 hex chars (r ‖ s, 64 B)"); }
   }
   const aux=b.aux;
   if(aux.scheme!=="bc30-aux-v2") p.push('aux.scheme must be "bc30-aux-v2"');
@@ -2012,7 +2057,8 @@ function v4SchemaProblems(b){
   if(!isObj(tle)) p.push("aux.tl_entry missing");
   else {
     for(const [k,n] of [["issuer_id",16],["key_id",32],["public_key",33]]) tryHex(tle[k],n,"aux.tl_entry."+k);
-    if(tle.curve_id!==CURVE_P256) p.push("aux.tl_entry.curve_id must be 1 (P-256)");
+    if(v5){ if(![CURVE_P256,CURVE_SECP256K1].includes(tle.curve_id)) p.push("aux.tl_entry.curve_id must be 1 (P-256) or 2 (secp256k1)"); }
+    else if(tle.curve_id!==CURVE_P256) p.push("aux.tl_entry.curve_id must be 1 (P-256)");
     for(const k of ["valid_from","valid_to","revoked_at"]) if(!(Number.isSafeInteger(tle[k])&&tle[k]>=0)) p.push("aux.tl_entry."+k+" must be a non-negative integer");
   }
   if(!isObj(aux.tl_proof)) p.push("aux.tl_proof missing");
@@ -2025,6 +2071,7 @@ function v4SchemaProblems(b){
    → {steps:[{num,key,state,title,detail}], axes, info, grade, exitCode}. Pure: no DOM. */
 async function runV4(bundle, opts){
   opts=opts||{};
+  const v5=bundle.schema===SCHEMA_V5;   // single-signature v5 (§12.8): adds MUST 3/11/12 + the 0x04 branch
   const rpId=opts.rpId||BC30_RP_ID, origins=(opts.origins&&opts.origins.length)?opts.origins.slice():BC30_ORIGINS.slice();
   const now=opts.now===undefined||opts.now===null ? Math.floor(Date.now()/1000) : Number(opts.now);
   const R={ steps:[], axes:{attribution:"none", presenter:"not checked"}, info:{rpId, origins, now},
@@ -2034,8 +2081,8 @@ async function runV4(bundle, opts){
 
   // 0 · schema
   const probs0=v4SchemaProblems(bundle);
-  if(probs0.length){ R.step(0,"schema","bad","0 · Schema - bundle is not a well-formed v4 issuance bundle", probs0.join("<br>")); return R; }
-  R.step(0,"schema","ok","0 · Schema - bitcert-proof-bundle/v4 issuance · network: "+(bundle.bitcoin_network||"?"),
+  if(probs0.length){ R.step(0,"schema","bad","0 · Schema - bundle is not a well-formed "+(v5?"v5":"v4")+" issuance bundle", probs0.join("<br>")); return R; }
+  R.step(0,"schema","ok","0 · Schema - "+(v5?"bitcert-proof-bundle/v5 (single signature)":"bitcert-proof-bundle/v4")+" issuance · network: "+(bundle.bitcoin_network||"?"),
     "sections: record · merkle · anchor · issuer · aux"+(bundle.subject?" · subject":"")+(bundle.presentation?" · presentation":""));
   const rec=bundle.record, pre=rec.preimage, anchor=bundle.anchor, iss=bundle.issuer, aux=bundle.aux;
   const st=pre.subject_type;
@@ -2052,10 +2099,15 @@ async function runV4(bundle, opts){
     else R.step(1,"payload","ok","1 · Anchor payload - v31 (0x1F), flags 0b"+decoded.flags.toString(2).padStart(2,"0")+", IDENTITY_BOUND","batch_id: "+decoded.batch_id+"<br>aux_commitment: "+decoded.aux);
   }catch(e){ R.step(1,"payload","bad","1 · Anchor payload - error",err(e)); }
 
-  // 2 · policy_hash
+  // 2 · policy_hash (v5 additionally gates the §12.1 grammar - MUST 11)
   try{
     const ph=await policyHash(pre.policy); const ok=eqHex(bytesToHex(ph),pre.policy_hash);
-    R.step(2,"policy",ok?"ok":"bad","2 · Policy hash - "+(ok?"recomputes ✓":"MISMATCH ✗"),"JCS: "+policyJcs(pre.policy)+"<br>recomputed: "+bytesToHex(ph));
+    let grammarErr=null;
+    if(v5&&ok){ try{ policyValidate(pre.policy); }catch(pe){ grammarErr=String(pe.message||pe); } }
+    if(grammarErr!==null)
+      R.step(2,"policy","bad","2 · Policy - hash recomputes, but the grammar is violated ✗ (MUST 11)",grammarErr+"<br>JCS: "+policyJcs(pre.policy));
+    else
+      R.step(2,"policy",ok?"ok":"bad","2 · Policy hash - "+(ok?"recomputes ✓":"MISMATCH ✗"),"JCS: "+policyJcs(pre.policy)+"<br>recomputed: "+bytesToHex(ph));
   }catch(e){ R.step(2,"policy","bad","2 · Policy hash - error",err(e)); }
 
   // 3 · subject_ref
@@ -2079,9 +2131,9 @@ async function runV4(bundle, opts){
     R.axes.attribution="issuer-claim · pubkey";
     try{
       const sub=bundle.subject; subjectPk=hexToBytes(sub.public_key);
-      p256Decompress(subjectPk);
+      if(v5&&sub.curve_id===CURVE_SECP256K1) secpDecompress(subjectPk); else p256Decompress(subjectPk);
       const got=await subjectRefPubkey(sub.curve_id,subjectPk); const ok=bytesEq(got,ref);
-      R.step(3,"subject",ok?"ok":"bad","3 · Subject - registered key "+(ok?"normalises to ✓":"does NOT match ✗")+" subject_ref","SHA256(0x02 ‖ curve 0x01 ‖ pubkey): "+bytesToHex(got)+"<br>public_key: "+sub.public_key);
+      R.step(3,"subject",ok?"ok":"bad","3 · Subject - registered key "+(ok?"normalises to ✓":"does NOT match ✗")+" subject_ref","SHA256(0x02 ‖ curve 0x"+String(sub.curve_id).padStart(2,"0")+" ‖ pubkey): "+bytesToHex(got)+"<br>public_key: "+sub.public_key);
       if(!ok) subjectPk=null;
     }catch(e){ R.step(3,"subject","bad","3 · Subject - public key unusable",err(e)); }
   }
@@ -2104,16 +2156,32 @@ async function runV4(bundle, opts){
   // 5 · issuer signature
   let sBytes=null;
   try{
-    const issuerPk=hexToBytes(aux.tl_entry.public_key), asn=iss.assertion, alg=ALG_NAMES[iss.alg];
-    const sig=hexToBytes(asn.signature_der);
+    const issuerPk=hexToBytes(aux.tl_entry.public_key), asn=iss.assertion, alg=(v5?ALG_NAMES_V5:ALG_NAMES)[iss.alg];
     if(m===null) throw new Error("message m unavailable");
-    if(alg===ALG_WEBAUTHN_ES256){
+    if(alg===ALG_WALLET_SECP256K1){
+      // §12.3: s = 0x04 ‖ r ‖ s; the digest is verified DIRECTLY; low-s enforced.
+      const rs=hexToBytes(asn.signature_rs);
+      sBytes=concat(Uint8Array.of(0x04),rs);              // leaf commits the submitted bytes
+      const rI=zkBytesToBig(rs.subarray(0,32)), sI=zkBytesToBig(rs.subarray(32,64));
+      const digest=await bitcoinMessageDigest(walletIssuanceMessage(m));
+      if(!(rI>=1n&&rI<ZK_N&&sI>=1n&&sI<ZK_N))
+        R.step(5,"issuer_sig","bad","5 · Issuer signature - wallet-secp256k1 REJECTED ✗","r or s out of [1, n−1]");
+      else if(!secpIsLowS(sI))
+        R.step(5,"issuer_sig","bad","5 · Issuer signature - wallet-secp256k1 REJECTED ✗","s > n/2 - low-s is enforced for 0x04 (normalisation is ingestion's job)");
+      else {
+        const ok=secp256k1VerifyDigest(issuerPk,digest,rI,sI);
+        R.step(5,"issuer_sig",ok?"ok":"bad","5 · Issuer signature - wallet-secp256k1 "+(ok?"verifies ✓":"REJECTED ✗"),
+          "message: BC30 issuance "+bytesToHex(m)+"<br>digest (double-SHA256): "+bytesToHex(digest)+"<br>key_id "+iss.key_id);
+      }
+    } else if(alg===ALG_WEBAUTHN_ES256){
+      const sig=hexToBytes(asn.signature_der);
       const ad=hexToBytes(asn.authenticator_data), cdj=hexToBytes(asn.client_data_json);
       const r=await webauthnVerifyAssertion({pub33:issuerPk, authData:ad, cdj, sigDer:sig, challenge:m, rpId, origins});
       sBytes=issuerSigBytes(alg,sig,ad,cdj); R.info.issuerFacts=r.facts;
       const detail="rpId: claimed "+JSON.stringify(iss.rp_id)+" · pinned "+JSON.stringify(rpId)+"<br>origin: "+r.facts.origin+"<br>UV: "+r.facts.uv+" · UP: "+r.facts.up+" · signCount: "+r.facts.signCount;
       R.step(5,"issuer_sig",r.ok?"ok":"bad","5 · Issuer signature - webauthn-es256 "+(r.ok?"verifies ✓":"REJECTED ✗"),detail+(r.ok?"":"<br>"+r.reasons.map(x=>"· "+x).join("<br>")));
     } else {
+      const sig=hexToBytes(asn.signature_der);
       const ok=await p256Verify(issuerPk,m,sig);
       sBytes=issuerSigBytes(alg,sig);
       R.step(5,"issuer_sig",ok?"ok":"bad","5 · Issuer signature - es256-plain "+(ok?"verifies ✓":"REJECTED ✗"),"ES256 over m under key_id "+iss.key_id);
@@ -2148,8 +2216,11 @@ async function runV4(bundle, opts){
   const tle=aux.tl_entry;
   try{
     const pk=hexToBytes(tle.public_key);
-    if(tle.curve_id!==CURVE_P256) throw new Error("tl_entry.curve_id must be 1");
+    if(v5){ if(![CURVE_P256,CURVE_SECP256K1].includes(tle.curve_id)) throw new Error("tl_entry.curve_id must be 1 or 2"); }
+    else if(tle.curve_id!==CURVE_P256) throw new Error("tl_entry.curve_id must be 1");
     const kid=await keyIdOf(tle.curve_id,pk); const kidHex=bytesToHex(kid); const probs=[];
+    if(v5&&tle.curve_id!==ALG_CURVE_V5[iss.alg])
+      probs.push("issuer.alg "+iss.alg+" requires curve_id "+ALG_CURVE_V5[iss.alg]+", tl_entry has "+tle.curve_id+" (MUST 3)");
     if(!eqHex(kidHex,String(tle.key_id||""))) probs.push("tl_entry.key_id ≠ SHA256(0x02‖curve‖pubkey)");
     if(!eqHex(kidHex,iss.key_id)) probs.push("issuer.key_id ≠ tl_entry key");
     if(!eqHex(String(tle.issuer_id||""),iss.issuer_id)) probs.push("issuer.issuer_id ≠ tl_entry.issuer_id");
@@ -2268,6 +2339,440 @@ async function runV4(bundle, opts){
   // 18 · on-chain - the browser has its own panel; here it is always the offline skip
   R.step(18,"onchain","skip","18 · On-chain confirmation - SKIPPED (offline)","txid: "+txid+"<br>use the on-chain panel below (any Bitcoin source, never BitCert) to confirm and compare block_time");
   return R;
+}
+
+/* ======== bundle v5 multi-signature pipeline (schema §12.4-§12.8) ======== */
+const V5_SIGNER_FIELDS=["role","alg","curve_id","public_key","key_id","rp_id","assertion","tl_entry","tl_proof"];
+const V5_ASSERTION_FIELDS={"webauthn-es256":["authenticator_data","client_data_json","signature_der"],
+                           "es256-plain":["signature_der"],"wallet-secp256k1":["signature_rs"]};
+
+/* Shape gate for a signers[] bundle: §12.4 whitelist, the tl pair rule and
+   alg↔curve (MUST 2+3), one canonical envelope (§12.8). Mirrors verify.py. */
+function v5MultiSchemaProblems(b){
+  const p=[]; const isObj=x=>x&&typeof x==="object"&&!Array.isArray(x);
+  const tryHex=(h,n,what)=>{ try{ hexb(h,n,what); }catch(e){ p.push(e.message); } };
+  for(const k of ["record","merkle","anchor","aux"]) if(!isObj(b[k])) p.push("missing section \""+k+"\"");
+  if(!Array.isArray(b.signers)) p.push("signers must be an array");
+  if(p.length) return p;
+  if(b.issuer!==undefined&&b.issuer!==null) p.push("signers[] and an issuer section are mutually exclusive - one canonical envelope (§12.8)");
+  const KNOWN=["schema","bitcoin_network","generated_at","record","merkle","anchor","signers","subject","aux","presentation","chain"];
+  for(const k of Object.keys(b)) if(!KNOWN.includes(k)&&k!=="issuer") p.push("unknown top-level key `"+k+"` (a v5 multi-signature bundle carries only: "+KNOWN.join(", ")+")");
+  if(b.reconciliation!==undefined&&b.reconciliation!==null) p.push("v5 does not allow `reconciliation`");
+  if(b.anchor.witness_envelope!==undefined&&b.anchor.witness_envelope!==null) p.push("v5 does not allow `witness_envelope`");
+  const rec=b.record, pre=rec.preimage;
+  if(rec.kind!=="issuance") p.push('record.kind must be "issuance"');
+  if(!isObj(pre)) return p.concat(["record.preimage missing"]);
+  if(pre.scheme!=="bc30-leaf-v2") p.push('preimage.scheme must be "bc30-leaf-v2"');
+  if(pre.leaf_type!==LEAF_TYPE_ISSUANCE) p.push("preimage.leaf_type must be 1");
+  for(const [k,n] of [["record_salt",16],["doc_sha256",32],["subject_ref",32],["policy_hash",32]]) tryHex(pre[k],n,"preimage."+k);
+  tryHex(rec.leaf_bytes,32,"record.leaf_bytes");
+  const st=pre.subject_type;
+  if(![0,1,2].includes(st)) p.push("preimage.subject_type must be 0/1/2");
+  for(const k of ["issued_at","expires_at"]) if(!isUint(pre[k])) p.push("preimage."+k+" must be a non-negative integer");
+  if(isUint(pre.issued_at)&&isUint(pre.expires_at)&&pre.expires_at!==0&&pre.expires_at<=pre.issued_at) p.push("preimage.expires_at must be 0 or later than issued_at");
+  if(!isObj(pre.policy)) p.push("preimage.policy must be an object");
+  if("content_type" in pre && (typeof pre.content_type!=="string" || !pre.content_type)) p.push("preimage.content_type, when present, must be a non-empty string");
+  if(st===SUBJECT_PUBKEY){
+    const sub=b.subject;
+    if(!isObj(sub)) p.push("subject section required for subject_type 2");
+    else if(![CURVE_P256,CURVE_SECP256K1].includes(sub.curve_id)) p.push("subject.curve_id must be 1 (P-256) or 2 (secp256k1)");
+    else tryHex(sub.public_key,33,"subject.public_key");
+  }
+  const aux=b.aux;
+  if(aux.scheme!=="bc30-aux-v2") p.push('aux.scheme must be "bc30-aux-v2"');
+  for(const k of ["tl_root","sl_root","envelope_root"]) tryHex(aux[k],32,"aux."+k);
+  if((aux.tl_entry!==undefined&&aux.tl_entry!==null)||(aux.tl_proof!==undefined&&aux.tl_proof!==null))
+    p.push("a signers[] bundle carries per-signer tl_entry/tl_proof - aux must not carry them (§12.4)");
+  const sg=b.signers;
+  if(sg.length<MULTISIG_MIN_COUNT||sg.length>MULTISIG_MAX_COUNT)
+    p.push("signers[] must carry "+MULTISIG_MIN_COUNT+"..="+MULTISIG_MAX_COUNT+" entries, got "+sg.length);
+  sg.forEach(function(e,i){
+    const tag="signers["+i+"]";
+    if(!isObj(e)){ p.push(tag+" must be an object"); return; }
+    for(const k of Object.keys(e)) if(!V5_SIGNER_FIELDS.includes(k))
+      p.push(tag+"."+k+" is not an allowed field (there is deliberately no per-signer sl_proof - §12.4)");
+    if(!(e.role in COSIGN_ROLE_ORD)) p.push(tag+".role must be one of: issuer | co-issuer | subject-consent | endorser");
+    const alg=e.alg;
+    if(!Object.prototype.hasOwnProperty.call(ALG_NAMES_V5,alg)){ p.push(tag+".alg must be webauthn-es256 | es256-plain | wallet-secp256k1"); return; }
+    if(e.curve_id!==ALG_CURVE_V5[alg]) p.push(tag+": alg "+alg+" requires curve_id "+ALG_CURVE_V5[alg]+" (MUST 3)");
+    tryHex(e.public_key,33,tag+".public_key"); tryHex(e.key_id,32,tag+".key_id");
+    if(alg!=="webauthn-es256"&&e.rp_id!==undefined&&e.rp_id!==null) p.push(tag+".rp_id is only meaningful for webauthn-es256");
+    const asn=e.assertion;
+    if(!isObj(asn)) p.push(tag+".assertion missing");
+    else {
+      const needK=V5_ASSERTION_FIELDS[alg];
+      for(const k of Object.keys(asn)) if(!needK.includes(k)) p.push(tag+".assertion."+k+" is not an allowed field for "+alg);
+      for(const k of needK){ const v=asn[k];
+        if(typeof v!=="string"||!v||v.length%2||!/^[0-9a-fA-F]*$/.test(v)) p.push(tag+".assertion."+k+" must be hex");
+        else if(k==="signature_rs"&&v.length!==128) p.push(tag+".assertion.signature_rs must be 128 hex chars (r ‖ s, 64 B)"); }
+    }
+    const tle=e.tl_entry===undefined?null:e.tl_entry, tp=e.tl_proof===undefined?null:e.tl_proof;
+    if((tle===null)!==(tp===null)) p.push(tag+": tl_entry and tl_proof are BOTH present or BOTH absent (MUST 2)");
+    if(tle!==null){
+      if(!isObj(tle)) p.push(tag+".tl_entry must be an object");
+      else {
+        for(const [k,n] of [["issuer_id",16],["key_id",32],["public_key",33]]) tryHex(tle[k],n,tag+".tl_entry."+k);
+        if(![CURVE_P256,CURVE_SECP256K1].includes(tle.curve_id)) p.push(tag+".tl_entry.curve_id must be 1 (P-256) or 2 (secp256k1)");
+        for(const k of ["valid_from","valid_to","revoked_at"]) if(!(Number.isSafeInteger(tle[k])&&tle[k]>=0)) p.push(tag+".tl_entry."+k+" must be a non-negative integer");
+      }
+    }
+    if(tp!==null&&!isObj(tp)) p.push(tag+".tl_proof must be an object");
+  });
+  if(!Array.isArray(b.merkle.siblings)||!Array.isArray(b.merkle.directions)) p.push("merkle.siblings/directions must be arrays");
+  if(typeof b.anchor.op_return_payload_hex!=="string") p.push("anchor.op_return_payload_hex missing");
+  return p;
+}
+
+/* §12.5: rebuild one entry's inner_sig from its assertion. The alg mapping is
+   closed, so a 0x10 nesting cannot even be EXPRESSED here. */
+function v5ReassembleInner(signer){
+  const asn=signer.assertion;
+  if(signer.alg==="webauthn-es256")
+    return issuerSigBytes(ALG_WEBAUTHN_ES256, hexToBytes(asn.signature_der), hexToBytes(asn.authenticator_data), hexToBytes(asn.client_data_json));
+  if(signer.alg==="es256-plain")
+    return issuerSigBytes(ALG_ES256_PLAIN, hexToBytes(asn.signature_der));
+  return concat(Uint8Array.of(0x04), hexToBytes(asn.signature_rs));
+}
+
+/* Verify ONE parsed 0x10 entry (MUST 6): m_i is recomputed from the role
+   PARSED OUT OF s, so a re-labelled entry fails even though its bytes parse. */
+async function verifyMultisigEntry(entry, pub33, m, rpId, origins){
+  const mi=await cosignMessage(m, entry.role);
+  if(entry.alg===ALG_WEBAUTHN_ES256){
+    const r=await webauthnVerifyAssertion({pub33, authData:entry.authData, cdj:entry.cdj, sigDer:entry.sigDer, challenge:mi, rpId, origins});
+    if(r.ok) return {ok:true, reasons:[]};
+    return {ok:false, err:r.reasons.some(x=>String(x).includes("challenge"))?"challenge_mismatch":"bad_signature", reasons:r.reasons};
+  }
+  if(entry.alg===ALG_ES256_PLAIN){
+    try{ const ok=await p256Verify(pub33, mi, entry.sigDer);
+      return ok?{ok:true,reasons:[]}:{ok:false,err:"bad_signature",reasons:["ES256 over m_i does not verify"]}; }
+    catch(e){ return {ok:false, err:"bad_signature", reasons:[String(e.message||e)]}; }
+  }
+  if(entry.alg===ALG_WALLET_SECP256K1){
+    if(!secpIsLowS(entry.s)) return {ok:false, err:"non_low_s", reasons:["s > n/2 - low-s is enforced for 0x04 (normalisation is ingestion's job)"]};
+    const digest=await bitcoinMessageDigest(walletCosignMessage(mi));
+    try{ const ok=secp256k1VerifyDigest(pub33, digest, entry.r, entry.s);
+      return ok?{ok:true,reasons:[]}:{ok:false,err:"bad_signature",reasons:["secp256k1 ECDSA over the cosign digest does not verify"]}; }
+    catch(e){ return {ok:false, err:"bad_signature", reasons:[String(e.message||e)]}; }
+  }
+  return {ok:false, err:"unknown_inner_alg", reasons:["alg 0x"+entry.alg.toString(16)]};
+}
+
+/* runV5Multi - the 13 MUSTs of §12.6 as numbered steps (0-21) on the same
+   grades/axes as runV4. Mirrors verify.py::verify_v5_multi step for step. */
+async function runV5Multi(bundle, opts){
+  opts=opts||{};
+  const rpId=opts.rpId||BC30_RP_ID, origins=(opts.origins&&opts.origins.length)?opts.origins.slice():BC30_ORIGINS.slice();
+  const now=opts.now===undefined||opts.now===null ? Math.floor(Date.now()/1000) : Number(opts.now);
+  const R={ steps:[], axes:{attribution:"none", presenter:"not checked"}, info:{rpId, origins, now},
+            step(num,key,state,title,detail){ this.steps.push({num,key,state,title,detail:detail||""}); return state==="ok"; },
+            get grade(){ return reduceGrade(this.steps.map(s=>s.state)); }, get exitCode(){ return GRADE_EXIT[this.grade]; } };
+  const err=e=>String(e&&e.message||e);
+  const pad=r=>String(r).padEnd(15);
+
+  // 0 · schema (MUST 2 JSON shape + MUST 3 + §12.8 canonical envelope)
+  const probs0=v5MultiSchemaProblems(bundle);
+  if(probs0.length){ R.step(0,"schema","bad","0 · Schema - bundle is not a well-formed v5 multi-signature bundle", probs0.join("<br>")); return R; }
+  const signers=bundle.signers;
+  R.step(0,"schema","ok","0 · Schema - bitcert-proof-bundle/v5 multi-signature ("+signers.length+" signers) · network: "+(bundle.bitcoin_network||"?"),
+    "sections: record · merkle · anchor · signers · aux"+(bundle.subject?" · subject":"")+(bundle.presentation?" · presentation":""));
+  const rec=bundle.record, pre=rec.preimage, anchor=bundle.anchor, aux=bundle.aux;
+  const st=pre.subject_type;
+
+  // 1 · payload
+  let decoded=null;
+  try{
+    decoded=decodeAnchorPayload(anchor.op_return_payload_hex);
+    if(decoded.format!=="BC30") R.step(1,"payload","bad","1 · Anchor payload - "+payloadName(decoded)+" cannot carry a bound batch (86-byte payload v31 required)");
+    else if(decoded.version!==OP_RETURN_V31_VERSION) R.step(1,"payload","bad","1 · Anchor payload - version 0x"+decoded.version.toString(16).padStart(2,"0")+", v5 requires 0x1F","a legacy (0x1E) anchor cannot be presented as identity-bound");
+    else if(decoded.flags & ~FLAGS_DEFINED_MASK_V31) R.step(1,"payload","bad","1 · Anchor payload - undefined flag bits 0x"+decoded.flags.toString(16).padStart(2,"0"));
+    else if(!(decoded.flags & FLAG_IDENTITY_BOUND)) R.step(1,"payload","bad","1 · Anchor payload - IDENTITY_BOUND (bit 1) not set","this anchor is not a bound batch; a v5 bundle cannot ride on it");
+    else if(decoded.flags & FLAG_WITNESS_PRESENT) R.step(1,"payload","warn","1 · Anchor payload - v31, IDENTITY_BOUND + WITNESS_PRESENT","a bound batch with a witness is undefined in this revision; treated as a warning");
+    else R.step(1,"payload","ok","1 · Anchor payload - v31 (0x1F), flags 0b"+decoded.flags.toString(2).padStart(2,"0")+", IDENTITY_BOUND","batch_id: "+decoded.batch_id+"<br>aux_commitment: "+decoded.aux);
+  }catch(e){ R.step(1,"payload","bad","1 · Anchor payload - error",err(e)); }
+
+  // 2 · policy hash + grammar (MUST 11)
+  try{
+    const ph=await policyHash(pre.policy); const ok=eqHex(bytesToHex(ph),pre.policy_hash);
+    let grammarErr=null;
+    if(ok){ try{ policyValidate(pre.policy); }catch(pe){ grammarErr=String(pe.message||pe); } }
+    if(grammarErr!==null)
+      R.step(2,"policy","bad","2 · Policy - hash recomputes, but the grammar is violated ✗ (MUST 11)",grammarErr+"<br>JCS: "+policyJcs(pre.policy));
+    else
+      R.step(2,"policy",ok?"ok":"bad","2 · Policy hash - "+(ok?"recomputes ✓":"MISMATCH ✗"),"JCS: "+policyJcs(pre.policy)+"<br>recomputed: "+bytesToHex(ph));
+  }catch(e){ R.step(2,"policy","bad","2 · Policy hash - error",err(e)); }
+
+  // 3 · subject_ref
+  const salt=hexToBytes(pre.record_salt), ref=hexToBytes(pre.subject_ref);
+  let subjectPk=null;
+  if(st===SUBJECT_NONE){
+    const ok=bytesEq(ref,subjectRefNone());
+    R.step(3,"subject",ok?"ok":"bad","3 · Subject - none (subject_ref "+(ok?"is zero ✓)":"must be zero ✗)"));
+    R.axes.attribution="none";
+  } else if(st===SUBJECT_ID_HASH){
+    R.axes.attribution="issuer-claim · identifier";
+    if(opts.identifier===undefined||opts.identifier===null){
+      R.step(3,"subject","skip","3 · Subject - identifier hash, not checked","enter the identifier the issuer wrote to recompute SHA256(record_salt ‖ identifier)");
+      R.axes.attribution+=" · not checked";
+    } else {
+      const got=await subjectRefIdHash(salt,opts.identifier); const ok=bytesEq(got,ref);
+      R.step(3,"subject",ok?"ok":"bad","3 · Subject - identifier "+(ok?"matches ✓":"does NOT match ✗")+" the salted reference","SHA256(record_salt ‖ identifier): "+bytesToHex(got));
+      R.axes.attribution+= ok?" ✓":" ✗";
+    }
+  } else {
+    R.axes.attribution="issuer-claim · pubkey";
+    try{
+      const sub=bundle.subject; subjectPk=hexToBytes(sub.public_key);
+      if(sub.curve_id===CURVE_SECP256K1) secpDecompress(subjectPk); else p256Decompress(subjectPk);
+      const got=await subjectRefPubkey(sub.curve_id,subjectPk); const ok=bytesEq(got,ref);
+      R.step(3,"subject",ok?"ok":"bad","3 · Subject - registered key "+(ok?"normalises to ✓":"does NOT match ✗")+" subject_ref","SHA256(0x02 ‖ curve 0x"+String(sub.curve_id).padStart(2,"0")+" ‖ pubkey): "+bytesToHex(got)+"<br>public_key: "+sub.public_key);
+      if(!ok) subjectPk=null;
+    }catch(e){ R.step(3,"subject","bad","3 · Subject - public key unusable",err(e)); }
+  }
+
+  // 4 · R and m
+  let Rb=null, m=null;
+  try{
+    const doc=hexToBytes(pre.doc_sha256);
+    const args=[salt, doc, st, ref, pre.issued_at, pre.expires_at, hexToBytes(pre.policy_hash)];
+    Rb=recordBytes.apply(null,args); m=await issueMessage.apply(null,args);
+    R.info.mHex=bytesToHex(m); R.info.mB64u=bytesToB64u(m);
+    const detail="m: "+R.info.mHex+" (no entry signs the bare m - each signs its role-bound m_i)";
+    if(opts.originalBytes){
+      const got=await sha256(opts.originalBytes);
+      if(bytesEq(got,doc)) R.step(4,"record","ok","4 · Record R · message m - reconstructed, original binds to H(D) ✓",detail+"<br>SHA256(original): "+bytesToHex(got));
+      else R.step(4,"record","bad","4 · Record R · message m - supplied original does NOT hash to doc_sha256 ✗",detail+"<br>SHA256(original): "+bytesToHex(got)+"<br>doc_sha256: "+bytesToHex(doc));
+    } else R.step(4,"record","ok","4 · Record R · message m - reconstructed (143 B record)",detail+"<br>original not supplied - H(D) taken from the bundle");
+  }catch(e){ R.step(4,"record","bad","4 · Record R · message m - error",err(e)); }
+
+  // 5 · reassemble s + strict parse (MUST 1 + byte-level MUST 2)
+  let sBytes=null, parsed=null;
+  try{
+    sBytes=assembleMultisigS(signers.map(e=>({role:e.role, keyId:hexToBytes(e.key_id), inner:v5ReassembleInner(e)})));
+    parsed=parseMultisigS(sBytes);
+    const lines=parsed.map((e,i)=>"["+i+"] "+pad(e.role)+" key_id "+msKeyHex(e.keyId)+" · inner alg 0x"+e.alg.toString(16).padStart(2,"0")+" · "+e.inner.length+" B");
+    R.info.sLen=sBytes.length;
+    R.step(5,"reassembly","ok","5 · Envelope - s reassembled (0x10, "+parsed.length+" entries, "+sBytes.length+" B) and parses strictly ✓",lines.join("<br>"));
+  }catch(e){
+    parsed=null;
+    if(e&&e.code) R.step(5,"reassembly","bad","5 · Envelope - reassembled s REFUSED by the strict parse ✗",err(e)+"<br>the receiver never re-sorts; a mis-ordered or re-labelled signers[] must fail here");
+    else R.step(5,"reassembly","bad","5 · Envelope - error",err(e));
+  }
+
+  // 6 · per-signer key binding (MUST 4 + MUST 5)
+  try{
+    const probs=[], lines=[];
+    for(let i=0;i<signers.length;i++){
+      const e=signers[i];
+      const kid=await keyIdOf(e.curve_id, hexToBytes(e.public_key)); const kidHex=bytesToHex(kid);
+      if(!eqHex(kidHex,e.key_id)) probs.push("signers["+i+"]: key_id ≠ SHA256(0x02 ‖ curve ‖ public_key) (MUST 4)");
+      const tle=e.tl_entry;
+      if(tle!==undefined&&tle!==null){
+        if(!eqHex(String(tle.key_id||""),e.key_id)) probs.push("signers["+i+"]: tl_entry.key_id ≠ entry key_id (MUST 5)");
+        if(!eqHex(String(tle.public_key||""),e.public_key)) probs.push("signers["+i+"]: tl_entry.public_key ≠ entry public_key (MUST 5)");
+        if(tle.curve_id!==e.curve_id) probs.push("signers["+i+"]: tl_entry.curve_id ≠ entry curve_id (MUST 5)");
+      }
+      lines.push("["+i+"] "+pad(e.role)+" key_id "+kidHex+" ✓");
+    }
+    R.step(6,"key_binding",probs.length?"bad":"ok","6 · Signer keys - key_id "+(probs.length?"does NOT bind ✗":"re-derives from ✓")+" each public key",
+      (probs.length?probs.map(x=>"· "+x):lines).join("<br>"));
+  }catch(e){ R.step(6,"key_binding","bad","6 · Signer keys - error",err(e)); }
+
+  // 7 · signatures over each m_i (MUST 6)
+  try{
+    if(parsed===null||m===null) throw new Error("envelope or message m unavailable");
+    const probs=[], lines=[];
+    for(let i=0;i<signers.length;i++){
+      const e=signers[i], pe=parsed[i];
+      const tle=(e.tl_entry===undefined)?null:e.tl_entry;
+      const pk=hexToBytes(tle!==null?tle.public_key:e.public_key);
+      const r=await verifyMultisigEntry(pe, pk, m, rpId, origins);
+      const src=tle!==null?"tl_entry key":"entry key (unlisted)";
+      if(r.ok) lines.push("["+i+"] "+pad(pe.role)+" "+src+" · m_i "+bytesToHex(await cosignMessage(m,pe.role)).slice(0,16)+" ✓");
+      else probs.push("signers["+i+"] "+pe.role+": "+r.err+(r.reasons.length?" - "+r.reasons.join("; "):""));
+    }
+    R.step(7,"signer_sigs",probs.length?"bad":"ok","7 · Signer signatures - "+(probs.length?"REJECTED ✗":"every entry verifies over its role-bound m_i ✓"),
+      (probs.length?probs.map(x=>"· "+x):lines).join("<br>"));
+  }catch(e){ R.step(7,"signer_sigs","bad","7 · Signer signatures - error",err(e)); }
+
+  // 8 · leaf_input
+  let li=null;
+  try{
+    if(Rb===null||sBytes===null) throw new Error("record or signature bytes unavailable");
+    li=await leafInputV2(LEAF_TYPE_ISSUANCE,Rb,sBytes); const ok=eqHex(bytesToHex(li),rec.leaf_bytes);
+    R.info.leafInput=bytesToHex(li);
+    R.step(8,"leaf",ok?"ok":"bad","8 · leaf_input - SHA256(leaf-v2 tag ‖ 0x01 ‖ R ‖ s) "+(ok?"== ✓":"≠ ✗")+" record.leaf_bytes","recomputed: "+bytesToHex(li)+"<br>claimed: "+rec.leaf_bytes);
+  }catch(e){ R.step(8,"leaf","bad","8 · leaf_input - error",err(e)); }
+
+  // 9 · merkle inclusion
+  let merkleRoot=null, merkleRes=null;
+  const claimedLeaf=hexToBytes(rec.leaf_bytes);
+  try{
+    merkleRes=await verifyMerkle(rec,bundle.merkle); merkleRoot=merkleRes.ok?merkleRes.computedRoot:null;
+    R.step(9,"merkle",merkleRes.ok?"ok":"bad","9 · Merkle inclusion - leaf is "+(merkleRes.ok?"in":"NOT in")+" the root","recomputed root: "+merkleRes.computedRoot+(merkleRes.ok?"":"<br>claimed root: "+bundle.merkle.root));
+  }catch(e){ R.step(9,"merkle","bad","9 · Merkle inclusion - error",err(e)); }
+  R.info.merkle=merkleRes;
+
+  // 10 · anchor output root (closes MUST 12)
+  if(decoded!==null&&merkleRoot!==null){
+    const ok=eqHex(decoded.merkle_root,merkleRoot);
+    R.step(10,"root",ok?"ok":"bad","10 · Anchor output - merkle_root is "+(ok?"committed ✓":"NOT committed ✗")+" on-chain","payload merkle_root: "+decoded.merkle_root);
+  } else R.step(10,"root","bad","10 · Anchor output - cannot compare (payload or root unavailable)");
+
+  // 11 · trust list per signer (MUST 7 + MUST 9)
+  const proven=[];
+  try{
+    const probs=[], lines=[];
+    for(let i=0;i<signers.length;i++){
+      const e=signers[i];
+      const tle=(e.tl_entry===undefined)?null:e.tl_entry, tp=(e.tl_proof===undefined)?null:e.tl_proof;
+      if(tle===null){
+        if(e.role==="issuer"||e.role==="co-issuer") probs.push("signers["+i+"] "+e.role+" has no tl_proof - an organisation key MUST be proven listed (MUST 9)");
+        else lines.push("["+i+"] "+pad(e.role)+" unlisted key - revocation not provable (allowed for this role)");
+        continue;
+      }
+      const entry=tlEntryBytes(hexToBytes(tle.issuer_id),hexToBytes(tle.key_id),tle.curve_id,hexToBytes(tle.public_key),tle.valid_from,tle.valid_to,tle.revoked_at);
+      const mr=await verifyMerkle({leaf_bytes:bytesToHex(await tlLeaf(entry))},{root:aux.tl_root, siblings:tp.siblings||[], directions:tp.directions||[]});
+      if(mr.ok){ proven.push({i, tle}); lines.push("["+i+"] "+pad(e.role)+" issuer_id "+tle.issuer_id+" · listed under TL_root ✓"); }
+      else probs.push("signers["+i+"] "+e.role+": tl_entry does NOT fold to the aux TL_root (recomputed "+mr.computedRoot+")");
+    }
+    R.step(11,"trust_list",probs.length?"bad":"ok","11 · Trust list - "+(probs.length?"NOT proven ✗":"every organisation key proven under the ONE platform TL_root ✓"),
+      lines.concat(probs.map(x=>"· "+x)).join("<br>")+"<br>listing proves the KEY; approval of THIS record is proven only by the m_i signature");
+  }catch(e){ R.step(11,"trust_list","bad","11 · Trust list - error",err(e)); }
+
+  // 12 · envelope_root
+  { const env=bytesToHex(await envelopeRootNone()); const ok=eqHex(aux.envelope_root,env);
+    R.step(12,"envelope",ok?"ok":"bad","12 · Envelope root - "+(ok?"constant (envelope-none tag) ✓":"unexpected value ✗"),ok?"":"expected "+env); }
+
+  // 13 · aux recompute
+  try{
+    const got=bytesToHex(await auxCommitment(hexToBytes(aux.tl_root),hexToBytes(aux.sl_root),hexToBytes(aux.envelope_root)));
+    if(decoded===null||decoded.format!=="BC30") R.step(13,"aux","bad","13 · aux_commitment - no 86-byte payload to compare against","recomputed: "+got);
+    else { const ok=eqHex(got,decoded.aux);
+      R.step(13,"aux",ok?"ok":"bad","13 · aux_commitment - SHA256(aux tag ‖ TL ‖ SL ‖ env) "+(ok?"matches ✓":"MISMATCH ✗")+" on-chain","recomputed: "+got+"<br>on-chain: "+decoded.aux); }
+  }catch(e){ R.step(13,"aux","bad","13 · aux_commitment - error",err(e)); }
+
+  // 14 · key validity at block time (MUST 8, graded per §12.7)
+  let bt=null;
+  try{
+    const confirmed=anchor.confirmed;
+    bt=(confirmed&&typeof confirmed==="object"&&!Array.isArray(confirmed))?confirmed.block_time:null;
+    if(!(Number.isInteger(bt)&&bt>0)){
+      bt=null;
+      R.step(14,"key_validity","undet","14 · Key validity - no block_time in the bundle","each signer key's validity window is judged at the BLOCK time, not at issued_at; without it the outcome is undetermined");
+    } else {
+      R.info.blockTime=bt;
+      const hard=[], soft=[], lines=[];
+      for(const {i, tle} of proven){
+        const role=signers[i].role;
+        const vf=tle.valid_from, vt=tle.valid_to, ra=tle.revoked_at, bad=[];
+        if(vf>bt) bad.push("valid_from "+vf+" is after block_time "+bt);
+        if(vt&&vt<bt) bad.push("valid_to "+vt+" is before block_time "+bt);
+        if(ra&&ra<=bt) bad.push("revoked at "+ra+", on or before block_time "+bt);
+        if(bad.length) (role==="issuer"||role==="co-issuer"?hard:soft).push("signers["+i+"] "+role+": "+bad.join("; "));
+        else lines.push("["+i+"] "+pad(role)+" valid at block time ✓");
+      }
+      if(hard.length) R.step(14,"key_validity","bad","14 · Key validity - an organisation key NOT valid at block time ✗ (§12.7: rejected)",hard.concat(soft).map(x=>"· "+x).join("<br>"));
+      else if(soft.length) R.step(14,"key_validity","warn","14 · Key validity - a consent/endorser key invalid at block time (§12.7: flagged, verdict stands)",lines.concat(soft.map(x=>"· "+x)).join("<br>"));
+      else if(pre.issued_at>bt+7200) R.step(14,"key_validity","warn","14 · Key validity - keys valid, but issued_at is more than 2 h after the block","issued_at "+pre.issued_at+" · block_time "+bt+" (self-reported time is only sanity-checked)");
+      else R.step(14,"key_validity","ok","14 · Key validity - every proven key valid at block time ✓","block_time "+bt+"<br>"+(lines.length?lines.join("<br>"):"(no listed keys to judge)"));
+    }
+  }catch(e){ R.step(14,"key_validity","bad","14 · Key validity - error",err(e)); }
+
+  // 15 · txid binding
+  let txid=anchor.reveal_txid; const raw=anchor.reveal_tx_hex;
+  if(!raw) R.step(15,"txid","undet","15 · Transaction binding - no reveal_tx_hex","a v5 bundle without the raw transaction cannot bind the payload to a txid");
+  else try{
+    const t=await txidFromRaw(raw);
+    const txidOk=eqHex(t.txid,txid||""), opOk=eqHex(t.anchorOutputHex||"",anchor.op_return_payload_hex), ok=txidOk&&opOk;
+    if(ok) txid=t.txid;
+    R.step(15,"txid",ok?"ok":"bad","15 · Transaction binding - payload "+(ok?"belongs to ✓":"does NOT match ✗")+" txid","computed txid: "+t.txid+"<br>bundle  txid: "+anchor.reveal_txid+"<br>payload in raw tx "+(opOk?"matches ✓":"MISMATCH ✗"));
+  }catch(e){ R.step(15,"txid","bad","15 · Transaction binding - error",err(e)); }
+  R.info.txid=txid;
+
+  // 16 · document expiry
+  const exp=pre.expires_at;
+  if(exp===0) R.step(16,"expiry","ok","16 · Document expiry - none declared");
+  else if(exp<now) R.step(16,"expiry","warn","16 · Document expiry - EXPIRED","expires_at "+exp+" < now "+now);
+  else R.step(16,"expiry","ok","16 · Document expiry - valid until "+exp,"now "+now);
+
+  // 17 · record revocation at anchor time (MUST 10 - aux.sl_proof, singular)
+  const sp=aux.sl_proof;
+  if(!sp||typeof sp!=="object"||Array.isArray(sp)) R.step(17,"revocation","undet","17 · Revocation at anchor - no sl_proof in the bundle","without an exclusion proof against sl_root the revocation status at anchor time is undetermined");
+  else try{
+    const key=hexb(sp.key,32,"sl_proof.key");
+    if(!bytesEq(key,claimedLeaf)) throw new Error("sl_proof.key is not this record's leaf_input");
+    if(!Array.isArray(sp.siblings)||sp.siblings.length!==SMT_HEIGHT) throw new Error("sl_proof must carry exactly 256 siblings");
+    const sibs=sp.siblings.map(x=>hexb(x,32,"sibling"));
+    const val=(sp.value===null||sp.value===undefined)?null:hexb(sp.value,32,"sl_proof.value");
+    const folded=bytesToHex(await smtFold(key,val,sibs));
+    if(!eqHex(folded,aux.sl_root)) R.step(17,"revocation","bad","17 · Revocation at anchor - proof does NOT fold to sl_root ✗","folded: "+folded+"<br>sl_root: "+aux.sl_root+"<br>(exclusion folds from the pinned EMPTY_LEAF "+bytesToHex(await smtEmptyLeaf())+")");
+    else if(val!==null){ let ra=0; for(let i=24;i<32;i++) ra=ra*256+val[i];
+      R.step(17,"revocation","bad","17 · Revocation at anchor - record was ALREADY REVOKED when anchored ✗","sl value: "+bytesToHex(val)+" (revoked_at "+ra+")"); }
+    else R.step(17,"revocation","ok","17 · Revocation at anchor - not revoked (exclusion proof) ✓","sl_root: "+aux.sl_root+"<br>later revocation needs an online status-list check (not part of this bundle)");
+  }catch(e){ R.step(17,"revocation","bad","17 · Revocation at anchor - invalid proof",err(e)); }
+
+  // 18 · subject binding (MUST 13 - a mismatch WARNS, never rejects)
+  const consent=signers.map((e,i)=>({e,i})).filter(x=>x.e.role==="subject-consent");
+  if(st!==SUBJECT_PUBKEY||!consent.length){
+    R.step(18,"subject_binding","skip","18 · Subject consent binding - not applicable",
+      "needs subject_type 2 AND a subject-consent entry"+(consent.length?"<br>(consent entries present, but the record names no registered subject key)":""));
+  } else {
+    const match=consent.filter(x=>eqHex(x.e.key_id,pre.subject_ref));
+    if(match.length) R.step(18,"subject_binding","ok","18 · Subject consent binding - consent signed with the subject's OWN registered key ✓","signers["+match[0].i+"].key_id == subject_ref");
+    else R.step(18,"subject_binding","warn","18 · Subject consent binding - NOT the subject's own consent (flagged, verdict stands)",
+      "no subject-consent key_id equals subject_ref "+pre.subject_ref+"<br>the consent signature is valid, but it was not given by the record's named subject key");
+  }
+
+  // 19 · presentation - never rejects; degrades to "not available"
+  const pres=(opts.presentation!==undefined&&opts.presentation!==null)?opts.presentation:(bundle.presentation===undefined?null:bundle.presentation);
+  if(st!==SUBJECT_PUBKEY){
+    R.axes.presenter="not available";
+    R.step(19,"presentation","skip","19 · Presenter - not applicable (no registered recipient key)","only a subject_type 2 record can be presented with a passkey"+(pres===null?"":"<br>supplied presentation ignored"));
+  } else if(pres===null){
+    R.axes.presenter="not available";
+    R.step(19,"presentation","skip","19 · Presenter - no presentation supplied","start a presenter check below and paste the /present blob (with the nonce you generated) to confirm the holder");
+  } else try{
+    if(pres && pres.unparsable) throw new Error(pres.unparsable);
+    const p=(pres.leaf instanceof Uint8Array)?pres:normalizePresentation(pres); const probs=[];
+    if(!bytesEq(p.leaf,claimedLeaf)) probs.push("presentation is for a different record (leaf mismatch)");
+    if(opts.nonceHex===undefined||opts.nonceHex===null) probs.push("nonce ownership not established - supply the nonce you generated");
+    else if(!eqHex(bytesToHex(p.nonce),opts.nonceHex)) probs.push("presentation nonce is not ours (replay from another verifier?)");
+    if(p.expiry<now) probs.push("presentation expired (expiry "+p.expiry+" < now "+now+")");
+    if(subjectPk===null) probs.push("subject key unusable (see step 3)");
+    let facts={};
+    if(subjectPk!==null){
+      const ch=await presentChallenge(p.nonce,p.leaf,p.verifier_id,p.expiry);
+      const r=await webauthnVerifyAssertion({pub33:subjectPk, authData:p.authenticator_data, cdj:p.client_data_json, sigDer:p.signature, challenge:ch, rpId, origins});
+      probs.push.apply(probs,r.reasons); facts=r.facts; R.info.presentChallenge=bytesToHex(ch);
+    }
+    const detail="nonce "+bytesToHex(p.nonce)+" · expiry "+p.expiry+" · verifier_id "+bytesToHex(p.verifier_id)+"<br>rpId pinned "+JSON.stringify(rpId)+" · origin "+facts.origin+" · UV "+facts.uv;
+    if(probs.length){ R.axes.presenter="not available"; R.step(19,"presentation","warn","19 · Presenter - NOT confirmed (degraded, not rejected)",detail+"<br>"+probs.map(x=>"· "+x).join("<br>")); }
+    else { R.axes.presenter="confirmed"; R.step(19,"presentation","ok","19 · Presenter - holder of the registered key confirmed ✓",detail); }
+  }catch(e){ R.axes.presenter="not available"; R.step(19,"presentation","warn","19 · Presenter - presentation unreadable (degraded)",err(e)); }
+
+  // 20 · chain (§5, optional)
+  const ch=bundle.chain;
+  if(ch&&typeof ch==="object"&&ch.entry){
+    try{
+      const e=ch.entry; const ph=await payloadHash(e); const phOk=eqHex(ph,String(e.payload_hash||""));
+      const bodyOk = e.kind!=="daily" ? true : (merkleRoot!==null&&eqHex(String(e.body_hash||""),merkleRoot));
+      const link=await verifyChainLinks(ch.links||[],e); const ok=phOk&&bodyOk&&link.ok;
+      R.step(20,"chain",ok?"ok":"bad","20 · Chain entry - payload_hash "+(ok?"recomputes ✓":"MISMATCH ✗"),"seq "+e.seq+" ("+e.kind+")<br>recomputed payload_hash: "+ph+(link.detail?"<br>"+link.detail:""));
+    }catch(e){ R.step(20,"chain","bad","20 · Chain entry - error",err(e)); }
+  } else R.step(20,"chain","skip","20 · Chain entry - none carried");
+
+  // 21 · on-chain - the browser has its own panel; here it is always the offline skip
+  R.step(21,"onchain","skip","21 · On-chain confirmation - SKIPPED (offline)","txid: "+txid+"<br>use the on-chain panel below (any Bitcoin source, never BitCert) to confirm and compare block_time");
+  R.info.signersSummary=signers.map((e,i)=>({role:e.role, alg:e.alg, keyId:e.key_id, listed:proven.some(x=>x.i===i)}));
+  return R;
+}
+
+/* Dispatch a /v5 bundle: signers[] takes the multi-signature pipeline, a
+   single-signature bundle keeps the v4 pipeline (runV4 detects the schema). */
+async function runV5(bundle, opts){
+  if(Object.prototype.hasOwnProperty.call(bundle,"signers")) return runV5Multi(bundle, opts);
+  return runV4(bundle, opts);
 }
 
 /* ---------- UI plumbing ---------- */
@@ -2582,7 +3087,7 @@ function syncInputsToBundle(){
   const text=$("bundle").value.trim();
   let schema=null, st=null;
   try{ const b=JSON.parse(text); schema=b&&b.schema; st=b&&b.record&&b.record.preimage&&b.record.preimage.subject_type; }catch(e){}
-  const v4 = schema==="bitcert-proof-bundle/v4";
+  const v4 = schema==="bitcert-proof-bundle/v4" || schema==="bitcert-proof-bundle/v5";
   $("acctBlock").hidden=v4; $("acctNa").hidden=!v4;
   $("v4opts").hidden=!v4;
   if(!v4 || st!==2){ $("secPresent").hidden=true; }
@@ -3061,12 +3566,12 @@ async function verify(){
   catch(e){ verdict(false,"Not valid JSON","Paste a proof bundle JSON file."); return; }
   lastVerifiedFingerprint=bundleFingerprint($("bundle").value);
 
-  const SUPPORTED=["bitcert-proof-bundle/v1","bitcert-proof-bundle/v2","bitcert-proof-bundle/v3","bitcert-proof-bundle/v4"];
+  const SUPPORTED=["bitcert-proof-bundle/v1","bitcert-proof-bundle/v2","bitcert-proof-bundle/v3","bitcert-proof-bundle/v4","bitcert-proof-bundle/v5"];
   if(!SUPPORTED.includes(bundle.schema)){
     verdict(false,"Unsupported bundle schema",
       'Expected one of '+SUPPORTED.join(", ")+', got '+JSON.stringify(bundle.schema)); return;
   }
-  if(bundle.schema==="bitcert-proof-bundle/v4"){ await verifyV4UI(bundle); return; }
+  if(bundle.schema==="bitcert-proof-bundle/v4"||bundle.schema===SCHEMA_V5){ await verifyV4UI(bundle); return; }
   renderSummary(bundle);
   status("reading the bundle");
   renderStep("ok","Schema "+bundle.schema+(bundle.bitcoin_network?" · network: "+bundle.bitcoin_network:""));
@@ -3293,7 +3798,7 @@ async function verifyV4UI(bundle){
   status("verifying the identity-bound issuance");
   const opts=await collectV4Opts();
   if(bundle.anchor && bundle.anchor.op_return_payload_hex) renderStrip(bundle.anchor.op_return_payload_hex, false);
-  const R=await runV4(bundle, opts);
+  const R=bundle.schema===SCHEMA_V5 ? await runV5(bundle, opts) : await runV4(bundle, opts);
   const stateOf=k=>{ const s=R.steps.find(x=>x.key===k); return s?s.state:"idle"; };
   if(R.info.merkle && bundle.merkle && bundle.record){
     try{ buildTree(R.info.merkle, bundle.merkle, bundle.record); await animateTree(R.info.merkle); }catch(e){}
@@ -3307,7 +3812,8 @@ async function verifyV4UI(bundle){
       flagAux(aok, aok?"aux_commitment recomputes from the bundle's TL/SL/envelope roots":"aux_commitment does NOT match the bundle's roots"); }
   }
   for(const s of R.steps) renderStep(s.state, s.title, s.detail);
-  renderIssuer(bundle, R, stateOf); renderSubject(bundle, R, stateOf); renderTrust(bundle, R, stateOf); renderPresenter(bundle, R, stateOf);
+  if(Array.isArray(bundle.signers)) renderSigners(bundle, R, stateOf); else renderIssuer(bundle, R, stateOf);
+  renderSubject(bundle, R, stateOf); renderTrust(bundle, R, stateOf); renderPresenter(bundle, R, stateOf);
   $("oc-txid").textContent=R.info.txid||tr("(unknown)");
   show("onchainCard");
   status("");
@@ -3335,6 +3841,26 @@ function renderIssuer(b, R, stateOf){
     iss.alg==="webauthn-es256"?[tr("signature counter"), f.signCount!==undefined?String(f.signCount):""]:null,
     [tr("message m (challenge)"), R.info.mB64u, true],
   ]);
+  show("secIssuer");
+}
+/* v5 signers[] card: per-signer role · alg · listing · key id. Reuses the
+   issuer section; every value passes through gridCells' esc(). */
+function renderSigners(b, R, stateOf){
+  const sig=stateOf("signer_sigs"), tl=stateOf("trust_list"), kv=stateOf("key_validity"), sb=stateOf("subject_binding");
+  const word={ok:tr("verified ✓"), bad:tr("REJECTED ✕"), warn:tr("attention"), undet:tr("undetermined"), skip:tr("n/a"), idle:"-"};
+  const cells=[
+    [tr("signatures"), b.signers.length+" × "+word[sig]],
+    [tr("in trust list at anchor"), word[tl]],
+    [tr("key valid at block time"), word[kv]+(R.info.blockTime?" · block "+R.info.blockTime:" · no block_time")],
+    sb!=="skip"?[tr("subject consent binding"), word[sb==="ok"?"ok":sb==="warn"?"warn":sb]]:null,
+    [tr("message m"), R.info.mHex, true],
+  ];
+  const sum=R.info.signersSummary || b.signers.map(e=>({role:e.role, alg:e.alg, keyId:e.key_id, listed:!!e.tl_entry}));
+  sum.forEach(function(e,i){
+    cells.push(["["+i+"] "+e.role, e.alg+" · "+tr(e.listed?"listed in trust list":"unlisted key - revocation not provable")]);
+    cells.push(["["+i+"] "+tr("key id"), e.keyId, true]);
+  });
+  gridCells("issuerGrid", cells);
   show("secIssuer");
 }
 function renderSubject(b, R, stateOf){

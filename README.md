@@ -72,6 +72,19 @@ two **axes**: *attribution* (`none` · `issuer-claim · identifier` · `issuer-c
 pubkey`) and *presenter* (`confirmed` · `not available`). The passkey relying party
 is **pinned** to `console.bitcert.io`; the bundle's own `rp_id` is only a claim.
 
+### Multi-party issuance (bundle v5, §12)
+
+A **v5** bundle extends v4 with an **open policy grammar** (up to 16 key-value
+pairs under a hard displayability gate), a **Bitcoin wallet issuer signature**
+(`wallet-secp256k1`, signed with Unisat/Xverse/Leather over a tagged message;
+low-s enforced) and a role-labelled **multi-signature envelope**: up to 8
+signers - `issuer` · `co-issuer` · `subject-consent` · `endorser` - each signing
+a role-bound message `m_i`, so a collected signature cannot be re-labelled into
+a different role. Organisation keys (`issuer`/`co-issuer`) must prove listing
+under the platform trust list; a consent signed by the subject's own registered
+key is confirmed against `subject_ref` (a mismatch warns, never rejects). A
+single-signature v5 bundle keeps the v4 pipeline unchanged.
+
 ---
 
 ## Use it
@@ -217,6 +230,9 @@ python3 fixtures/v4-rc-matrix.py        # CLI exit codes 0/1/2/3/64 over fixture
 node    fixtures/browser-js-check.mjs   # browser JS == Python == ann-core test vector (+ v4 builders vs KAT)
 node    fixtures/p256/kat.mjs           # zk-core.js P-256/WebAuthn, crypto.subtle AND pure-BigInt paths
 node    fixtures/v4-grade-check.mjs     # index.html runV4 reproduces Python's oracle: grade, axes, every step
+python3 fixtures/v5-rc-matrix.py        # CLI exit codes 0/1/2 over fixtures/v5-expected.json (subprocess)
+node    fixtures/multisig/kat.mjs       # zk-core.js 0x10/wallet/policy primitives vs the engine KAT (27 negatives)
+node    fixtures/v5-grade-check.mjs     # index.html runV5 reproduces Python's oracle: grade, axes, every step
 node    tools/inline-zk.mjs --check     # the inlined crypto in index.html equals zk-core.js
 node    fixtures/zk/conformance.mjs && node fixtures/zk/browser-path.mjs
 ```
