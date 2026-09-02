@@ -169,7 +169,8 @@
   .verdict.undet .vbadge{ background:var(--undet); color:#fff; }
   .verdict.undet .vg{ color:var(--undet); }
   .verdict.undet .vgrade.g-undet{ border-color:var(--undet); background:var(--undet-soft); color:var(--undet); font-weight:600; }
-  /* the two axes a v4 verdict carries besides its grade (schema §12) */
+  /* the axes a v4/v5 verdict carries besides its grade (schema §12; ③ adds
+     `publication`, which appears only when the bundle claims the tier) */
   .vaxes{ display:flex; gap:7px; flex-wrap:wrap; margin-top:8px; }
   .vaxes[hidden]{ display:none; }
   .axis{ font-size:11px; font-family:var(--mono); padding:4px 9px; border-radius:7px; border:1px solid var(--line-2);
@@ -1492,6 +1493,170 @@ function assembleMultisigS(entries) {
   }
   return zkCat(...parts);
 }
+
+
+/* ---------- tier 3 inscription envelope (docs/inscription-tier-spec-2026-09-02.md) ----------
+ * The reveal witness carries body = R(143) ‖ s, so the record AND the issuer
+ * signature bytes come back out of the envelope. MUST 19/20 make that recovery
+ * unambiguous: one encoding per body, and the recovered fields must re-serialise
+ * to the very same script. index.html keeps its lenient parseEnvelope() for the
+ * v1-v3 unified-witness path; nothing below is shared with it. */
+const ENVELOPE_TAG_V1 = "BC30/envelope/v1";                        // spec 2.3
+const INSC_PROTOCOL_TAG = "bcrt";                                  // spec 2.1
+const INSC_CONTENT_TYPE = "application/vnd.bitcert.sig.v1";        // spec 2.1
+const INSC_MAX_PUSH = 520;                                         // every chunk but the last is EXACTLY this
+const INSC_RECORD_LEN = 143;
+const INSC_BODY_MAX = INSC_RECORD_LEN + 8192;                      // 8335 (MUST 19)
+const INSC_ENVELOPE_ROOT_NONE_TAG = "BC30/envelope/none";          // ①② keep the constant
+const TAPROOT_ANNEX_PREFIX = 0x50, TAPROOT_MAX_MERKLE_DEPTH = 128;
+
+/** Refusal with a stable machine identifier in `.code` - the engine KAT's
+ * inscription.negative[].error strings (and verify.py's EnvelopeError). */
+function envError(code, detail) { const e = new Error(code + (detail ? ": " + detail : "")); e.code = code; return e; }
+
+/** BIP-340 lift_x: 32 bytes are an x-only KEY only if x < p and x is on the
+ * curve. MUST 20 needs it - a leaf whose key is not a point can never be spent
+ * and its script cannot be rebuilt. Returns {x, y} with y even. */
+function secpLiftX(x32) {
+  if (!(x32 instanceof Uint8Array) || x32.length !== 32) throw new Error("x-only key must be 32 bytes");
+  const x = zkBytesToBig(x32);
+  if (x >= ZK_P) throw new Error("x is not a canonical field element");
+  const y = zkSqrtP(M(x * x % ZK_P * x + 7n));
+  if (y === null) throw new Error("x is not on secp256k1");
+  return { x, y: (y & 1n) === 0n ? y : ZK_P - y };
+}
+
+/** The SHORTEST push that can carry this length (MUST 19). Not BIP-62
+ * MINIMALDATA: that would demand OP_1..OP_16 for single bytes 0x01..0x10, and
+ * those are opcodes - inside an envelope they are forbidden_opcode. Both
+ * readings refuse the same scripts. */
+function inscPush(data) {
+  const n = data.length;
+  if (n === 0 || n > INSC_MAX_PUSH) throw envError("non_canonical_chunking", "push of " + n + " bytes (1.." + INSC_MAX_PUSH + ")");
+  if (n < 0x4c) return zkCat(Uint8Array.of(n), data);
+  if (n <= 0xff) return zkCat(Uint8Array.of(0x4c, n), data);
+  return zkCat(Uint8Array.of(0x4d, n & 255, (n >> 8) & 255), data);
+}
+
+/** spec 2.1 byte for byte - and MUST 20's reference serialisation:
+ *   <script_key(32 B x-only)> OP_CHECKSIG
+ *   OP_FALSE OP_IF <protocol_tag> <content_type> <body chunk…> OP_ENDIF   */
+function buildInscriptionScript(scriptKey, tag, contentType, body) {
+  if (scriptKey.length !== 32) throw envError("invalid_script_key", "script key must be 32 bytes");
+  const parts = [inscPush(scriptKey), Uint8Array.of(0xac, 0x00, 0x63), inscPush(tag), inscPush(contentType)];
+  for (let i = 0; i < body.length; i += INSC_MAX_PUSH) parts.push(inscPush(body.subarray(i, Math.min(i + INSC_MAX_PUSH, body.length))));
+  parts.push(Uint8Array.of(0x68));
+  return zkCat(...parts);
+}
+
+/** MUST 19 + MUST 20. Returns {scriptKey, protocolTag, contentType, body,
+ * chunkLens} or throws. Only `not_an_envelope` means "nothing was claimed". */
+function parseInscriptionEnvelope(script) {
+  if (!(script instanceof Uint8Array)) throw envError("not_an_envelope", "script must be bytes");
+  if (script.length < 37 || script[0] !== 0x20 || script[33] !== 0xac || script[34] !== 0x00 || script[35] !== 0x63)
+    throw envError("not_an_envelope", "script does not open with <32 B key> OP_CHECKSIG OP_FALSE OP_IF");
+  const scriptKey = script.subarray(1, 33);
+  let o = 36, closed = false;
+  const n = script.length, pushes = [];
+  while (o < n) {
+    const op = script[o++];
+    if (op === 0x68) { closed = true; break; }                       // OP_ENDIF
+    if (op === 0x63 || op === 0x64) throw envError("nested_conditional", "0x" + op.toString(16) + " inside the envelope");
+    if (op === 0x00) throw envError("forbidden_opcode", "OP_0 inside the envelope");
+    let ln;
+    if (op < 0x4c) ln = op;
+    else if (op === 0x4c) {
+      if (n - o < 1) throw envError("truncated_push", "OP_PUSHDATA1 length byte past the script");
+      ln = script[o++];
+      if (ln < 0x4c) throw envError("non_minimal_push", ln + " bytes pushed with OP_PUSHDATA1");
+    } else if (op === 0x4d) {
+      if (n - o < 2) throw envError("truncated_push", "OP_PUSHDATA2 length past the script");
+      ln = script[o] + (script[o + 1] << 8); o += 2;
+      if (ln <= 0xff) throw envError("non_minimal_push", ln + " bytes pushed with OP_PUSHDATA2");
+    } else if (op === 0x4e) throw envError("non_minimal_push", "OP_PUSHDATA4 cannot be the shortest form");
+    else throw envError("forbidden_opcode", "opcode 0x" + op.toString(16) + " inside the envelope");
+    if (ln > INSC_MAX_PUSH) throw envError("non_canonical_chunking", "push of " + ln + " bytes exceeds " + INSC_MAX_PUSH);
+    if (n - o < ln) throw envError("truncated_push", "push of " + ln + " bytes runs past the script");
+    pushes.push(script.subarray(o, o + ln)); o += ln;
+  }
+  if (!closed) throw envError("unterminated_envelope", "no OP_ENDIF");
+  if (o !== n) throw envError("trailing_bytes_after_endif", (n - o) + " byte(s) after OP_ENDIF");
+  if (pushes.length < 3) throw envError("empty_body", "envelope carries no body chunk");
+  const tag = pushes[0], contentType = pushes[1], chunks = pushes.slice(2);
+  for (let i = 0; i < chunks.length - 1; i++)
+    if (chunks[i].length !== INSC_MAX_PUSH)
+      throw envError("non_canonical_chunking", "chunk of " + chunks[i].length + " bytes before the last one (must be " + INSC_MAX_PUSH + ")");
+  const body = zkCat(...chunks);
+  if (body.length === 0) throw envError("empty_body", "body is zero bytes");
+  if (body.length > INSC_BODY_MAX) throw envError("body_too_large", "body is " + body.length + " bytes, cap " + INSC_BODY_MAX);
+  try { secpLiftX(scriptKey); } catch (e) { throw envError("invalid_script_key", e.message); }
+  // MUST 20 - rebuild the WHOLE script from what was recovered and demand byte
+  // identity. This is the line that closes every parser difference.
+  const rebuilt = buildInscriptionScript(scriptKey, tag, contentType, body);
+  if (rebuilt.length !== script.length || !rebuilt.every((b, i) => b === script[i]))
+    throw envError("reserialization_mismatch", "the recovered fields do not re-serialise to this script");
+  return { scriptKey, protocolTag: tag, contentType, body, chunkLens: chunks.map((c) => c.length) };
+}
+
+/** MUST 18. Read ONLY the indexed stack item (no scanning) after judging the
+ * stack: 2+ items, a well-formed control block last, no annex. */
+function inscriptionWitnessScript(items, index) {
+  if (!Array.isArray(items)) throw envError("no_witness", "this input carries no witness");
+  if (items.length >= 2 && items[items.length - 1].length > 0 && items[items.length - 1][0] === TAPROOT_ANNEX_PREFIX)
+    throw envError("annex_present", "last stack item starts with 0x50");
+  if (items.length < 2) throw envError("witness_too_short", "script-path spend needs [script, control block]");
+  const cb = items[items.length - 1];
+  if (cb.length < 33 || (cb.length - 33) % 32 !== 0 || (cb.length - 33) / 32 > TAPROOT_MAX_MERKLE_DEPTH || (cb[0] & 0xfe) !== 0xc0)
+    throw envError("malformed_control_block", "control block is 0xc0/0xc1 followed by 32k bytes, got " + cb.length + " bytes");
+  if (!Number.isInteger(index) || index < 0 || index >= items.length - 1)
+    throw envError("witness_index_out_of_range", "witness_item_index " + index + " is not a script item of a " + items.length + "-item stack");
+  return items[index];
+}
+
+/** spec 2.3 - the ONLY envelope_root preimage. The length prefixes stop
+ * (tag, content_type, body) from being re-cut into another triple with the same
+ * bytes; tag and content_type are inside so they are committed, not free text. */
+async function envelopeRootV1(tag, contentType, body) {
+  const u16 = (n) => Uint8Array.of((n >> 8) & 255, n & 255);
+  const u32 = (n) => Uint8Array.of((n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+  return zkSha256(zkCat(new TextEncoder().encode(ENVELOPE_TAG_V1),
+                        u16(tag.length), tag, u16(contentType.length), contentType, u32(body.length), body));
+}
+async function envelopeRootNoneHex() {
+  const h = await zkSha256(new TextEncoder().encode(INSC_ENVELOPE_ROOT_NONE_TAG));
+  return msKeyHex(h);
+}
+
+/** spec 3 + 4 (MUST 15/16): flags 0b11 is the ONLY ③ discriminator and the
+ * three claims stand or fall together
+ *   flags bit0 = 1 <-> aux.envelope_root != SHA256("BC30/envelope/none")
+ *                  <-> `inscription` present
+ * Returns [code, detail] or [null, null]. Pure, so the engine KAT's anchor
+ * negatives pin this decision directly. */
+function inscriptionEquivalenceError(flags, envelopeRootHex, noneRootHex, hasInscription) {
+  const hasEnv = String(envelopeRootHex || "").toLowerCase() !== noneRootHex;
+  if (flags === null || flags === undefined) return ["flags_unavailable", "no 86-byte payload to read flags from"];
+  if (!(flags & 0b10)) return ["flags_not_identity_bound",
+    "flags 0b" + flags.toString(2).padStart(2, "0") + ": the legacy unified-witness path never sets bit 1, so 0b11 stays the sole discriminator"];
+  if (flags & 0b01) {
+    if (!hasEnv) return ["flags_envelope_root_mismatch", "WITNESS_PRESENT is set but aux.envelope_root is the envelope-none constant"];
+    if (!hasInscription) return ["inscription_missing", "WITNESS_PRESENT is set but the bundle carries no `inscription` section"];
+    return [null, null];
+  }
+  if (hasEnv) return ["flags_envelope_root_mismatch", "aux.envelope_root is not the constant but WITNESS_PRESENT (bit 0) is clear"];
+  if (hasInscription) return ["inscription_unexpected", "`inscription` is present but WITNESS_PRESENT (bit 0) is clear"];
+  return [null, null];
+}
+
+/** MUST 25 - ③ is always a one-leaf batch: an empty path, and the root IS
+ * H_leaf(leaf_bytes). Returns an error id or null. */
+async function inscriptionBatchError(merkle, leafBytes) {
+  const want = msKeyHex(await zkSha256(zkCat(Uint8Array.of(0x00), leafBytes)));
+  const empty = (a) => Array.isArray(a) && a.length === 0;
+  if (!empty(merkle.siblings) || !empty(merkle.directions) || String(merkle.root || "").toLowerCase() !== want)
+    return "not_single_leaf_batch";
+  return null;
+}
 /* ===== END inlined zk-core.js ===== */
 
 /* ---------- hex / bytes ---------- */
@@ -2010,7 +2175,15 @@ function v4SchemaProblems(b){
   for(const k of ["record","merkle","anchor","issuer","aux"]) if(!isObj(b[k])) p.push("missing section \""+k+"\"");
   if(p.length) return p;
   const KNOWN=["schema","bitcoin_network","generated_at","record","merkle","anchor","issuer","subject","aux","presentation","chain"];
-  for(const k of Object.keys(b)) if(!KNOWN.includes(k)) p.push("unknown top-level key `"+k+"` (a v4 bundle carries only: "+KNOWN.join(", ")+")");
+  if(v5) KNOWN.push("inscription");                       // ③ (MUST 14) - v5 only
+  for(const k of Object.keys(b)){
+    if(KNOWN.includes(k)) continue;
+    if(k==="inscription") p.push("a v4 bundle must not carry `inscription` - the ③ inscription tier is v5 only");
+    else p.push("unknown top-level key `"+k+"` (a v4 bundle carries only: "+KNOWN.join(", ")+")");
+  }
+  if(v5&&Object.prototype.hasOwnProperty.call(b,"inscription")) p.push.apply(p,inscriptionSchemaProblems(b.inscription));
+  if(v5) for(const k of Object.keys(b.anchor)) if(!ANCHOR_FIELDS_V5.includes(k)&&k!=="witness_envelope")
+    p.push("anchor."+k+" is not an allowed field (a security field must not be able to hide under `anchor`)");
   if(b.reconciliation!==undefined&&b.reconciliation!==null) p.push("v4 does not allow `reconciliation`");
   if(b.anchor.witness_envelope!==undefined&&b.anchor.witness_envelope!==null) p.push("v4 does not allow `witness_envelope`");
   const rec=b.record, pre=rec.preimage;
@@ -2069,6 +2242,166 @@ function v4SchemaProblems(b){
 
 /* runV4(bundle, {identifier, presentation, nonceHex, rpId, origins, now, originalBytes})
    → {steps:[{num,key,state,title,detail}], axes, info, grade, exitCode}. Pure: no DOM. */
+/* ======== ③ inscription tier (docs/inscription-tier-spec-2026-09-02.md) ========
+ * MUST 14-26, on top of MUST 1-13 - never instead of them. The strict envelope
+ * parser, the witness rules and the envelope_root preimage live in the inlined
+ * zk-core block above (parseInscriptionEnvelope / inscriptionWitnessScript /
+ * envelopeRootV1), so the browser and fixtures/inscription/kat.mjs run the same
+ * code. Anything recovered from the chain reaches the DOM as HEX only, and every
+ * detail string goes through escDetail() - a body from a hostile envelope can
+ * never open a tag. */
+const INSC_FIELDS=["reveal_txid","input_index","witness_item_index"];
+const ANCHOR_FIELDS_V5=["reveal_txid","commit_txid","reveal_tx_hex","op_return_payload_hex","confirmed"];
+
+/* spec 4 - exactly three fields. protocol_tag/content_type are NOT among them:
+   they come from the witness, never from JSON. */
+function inscriptionSchemaProblems(ins){
+  if(!ins||typeof ins!=="object"||Array.isArray(ins)) return ["`inscription` must be an object"];
+  const p=[];
+  for(const k of Object.keys(ins)) if(!INSC_FIELDS.includes(k))
+    p.push("inscription."+k+" is not an allowed field (exactly: "+INSC_FIELDS.join(", ")+")");
+  try{ hexb(ins.reveal_txid,32,"inscription.reveal_txid"); }catch(e){ p.push(e.message); }
+  for(const k of ["input_index","witness_item_index"]) if(!isUint(ins[k])) p.push("inscription."+k+" must be a non-negative integer");
+  return p;
+}
+
+/* spec 4 three-way equivalence: if ANY of bit0 / a real envelope_root /
+   `inscription` is set the bundle claims ③, and MUST 14-26 run. */
+async function inscriptionClaimed(bundle, decoded){
+  if(Object.prototype.hasOwnProperty.call(bundle,"inscription")) return true;
+  try{ if(String((bundle.aux||{}).envelope_root||"").toLowerCase()!==bytesToHex(await envelopeRootNone())) return true; }catch(e){}
+  return !!(decoded&&decoded.format==="BC30"&&(decoded.flags&FLAG_WITNESS_PRESENT));
+}
+
+/* Did the source actually serve the witness for this input? A transaction whose
+   witness a source strips back is "not seen", not "different". */
+function chainWitnessSeen(hexStr, inputIndex){
+  try{ const w=extractWitnessItems(hexStr,inputIndex); return !!(w&&w.length); }catch(e){ return false; }
+}
+
+/* MUST 14-26 as numbered steps appended after the record pipeline, plus the
+   `publication` axis (spec 5.1). MUST 14 lives in step 0 (the schema gate).
+   Wording rule: an offline verdict never says the envelope is on Bitcoin - the
+   strongest offline claim is that the issuer signature bytes are committed as
+   the anchor's aux. */
+async function inscriptionSteps(R, bundle, decoded, base, Rb, sBytes, opts){
+  const anchor=bundle.anchor, aux=bundle.aux, rec=bundle.record;
+  const ins=Object.prototype.hasOwnProperty.call(bundle,"inscription")?bundle.inscription:null;
+  const err=e=>String(e&&e.message||e);
+  R.axes.publication="refused";
+  let n=base;
+
+  // 15 + 16 + 17 - flags 0b11, the three claims agreeing, one transaction
+  const flags=(decoded&&decoded.format==="BC30")?decoded.flags:null;
+  const envRootHex=String(aux.envelope_root||"").toLowerCase();
+  const noneRoot=bytesToHex(await envelopeRootNone());
+  let [code,detail]=inscriptionEquivalenceError(flags,envRootHex,noneRoot,ins!==null);
+  if(code===null&&ins===null){ code="inscription_missing"; detail="the bundle claims ③ but carries no `inscription` section"; }
+  if(code===null&&!eqHex(String(ins.reveal_txid||""),String(anchor.reveal_txid||""))){
+    code="reveal_txid_mismatch";
+    detail="inscription.reveal_txid "+String(ins.reveal_txid)+" != anchor.reveal_txid "+String(anchor.reveal_txid)+
+           " - the envelope and the 86-byte payload must be in the SAME transaction";
+  }
+  if(code!==null) R.step(n,"ins_anchor","bad",n+" · Inscription (③) - the claim is not consistent ✗ ("+code+")",detail);
+  else R.step(n,"ins_anchor","ok",n+" · Inscription (③) - flags 0b11, aux.envelope_root and `inscription` all agree ✓",
+    "reveal_txid "+ins.reveal_txid+" · input "+ins.input_index+" · witness item "+ins.witness_item_index+
+    "<br>envelope_root committed in aux: "+envRootHex);
+  n++;
+
+  // 18 + 19 + 20 - recover the envelope from the indexed witness item, strictly
+  let env=null;
+  const raw=anchor.reveal_tx_hex;
+  if(code!==null) R.step(n,"ins_envelope","bad",n+" · Envelope - not read (the ③ claim above is refused)");
+  else if(!raw) R.step(n,"ins_envelope","undet",n+" · Envelope - no reveal_tx_hex in the bundle (reveal_tx_missing)",
+    "the witness is read from the bundle's raw transaction; without it the envelope cannot be seen");
+  else {
+    try{
+      const items=extractWitnessItems(raw,ins.input_index);
+      const script=inscriptionWitnessScript(items,ins.witness_item_index);
+      env=parseInscriptionEnvelope(script);
+      R.step(n,"ins_envelope","ok",n+" · Envelope - strict parse and re-serialisation are byte-identical ✓",
+        "script "+script.length+" B · body "+env.body.length+" B · chunks ["+env.chunkLens.join(", ")+"]<br>script_key "+bytesToHex(env.scriptKey));
+    }catch(e){
+      if(e.code) R.step(n,"ins_envelope","bad",n+" · Envelope - REFUSED ✗ ("+e.code+")",err(e));
+      else R.step(n,"ins_envelope","bad",n+" · Envelope - error",err(e));
+    }
+  }
+  n++;
+
+  // 21 + 22 + 23 - tag, content type, R and s bound to the bundle's own bytes
+  if(env===null) R.step(n,"ins_binding",(code===null&&!raw)?"undet":"bad",n+" · Envelope binding - not checked (no envelope was recovered)");
+  else if(Rb===null||sBytes===null) R.step(n,"ins_binding","bad",n+" · Envelope binding - record or signature bytes unavailable ✗","steps above could not rebuild R or s");
+  else {
+    const body=env.body, probs=[];
+    if(bytesToHex(env.protocolTag)!==bytesToHex(TXT(INSC_PROTOCOL_TAG))) probs.push("protocol_tag_mismatch: "+bytesToHex(env.protocolTag));
+    if(bytesToHex(env.contentType)!==bytesToHex(TXT(INSC_CONTENT_TYPE))) probs.push("content_type_mismatch: "+bytesToHex(env.contentType));
+    if(!bytesEq(body.subarray(0,RECORD_LEN),Rb)) probs.push("record_mismatch: body[0..143] is not this bundle's R");
+    if(!bytesEq(body.subarray(RECORD_LEN),sBytes)) probs.push("signature_mismatch: body[143..] is not this bundle's s");
+    R.step(n,"ins_binding",probs.length?"bad":"ok",n+" · Envelope binding - body is this record's R ‖ s "+(probs.length?"✗":"✓"),
+      probs.length?probs.map(x=>"· "+x).join("<br>")
+        :"protocol_tag "+bytesToHex(env.protocolTag)+" · content_type "+bytesToHex(env.contentType)+
+         "<br>R "+RECORD_LEN+" B ‖ s "+(body.length-RECORD_LEN)+" B = "+body.length+" B");
+    if(probs.length) env=null;
+  }
+  n++;
+
+  // 24 - envelope_root recomputed from the preimage, and the aux fold on-chain
+  if(env===null) R.step(n,"ins_commit",(code===null&&!raw)?"undet":"bad",n+" · Envelope commitment - not checked (no envelope bound)","aux.envelope_root: "+envRootHex);
+  else {
+    try{
+      const got=bytesToHex(await envelopeRootV1(env.protocolTag,env.contentType,env.body));
+      const rootOk=got===envRootHex;
+      const fold=bytesToHex(await auxCommitment(hexToBytes(aux.tl_root),hexToBytes(aux.sl_root),hexToBytes(got)));
+      const foldOk=!!decoded&&fold===String(decoded.aux||"").toLowerCase();
+      R.step(n,"ins_commit",(rootOk&&foldOk)?"ok":"bad",
+        n+" · Envelope commitment - the issuer signature bytes are committed as the anchor's aux "+((rootOk&&foldOk)?"✓":"✗"),
+        "recomputed envelope_root: "+got+"<br>aux.envelope_root: "+envRootHex+"<br>aux fold: "+fold+
+        "<br>payload bytes 54..86: "+(decoded?decoded.aux:"(none)"));
+    }catch(e){ R.step(n,"ins_commit","bad",n+" · Envelope commitment - error",err(e)); }
+  }
+  n++;
+
+  // 25 - one leaf, no path: a zero-length proof cannot claim a different leaf
+  try{
+    const leaf=hexToBytes(rec.leaf_bytes);
+    const berr=await inscriptionBatchError(bundle.merkle,leaf);
+    const want=bytesToHex(await leafHash(leaf));
+    R.step(n,"ins_batch",berr===null?"ok":"bad",n+" · Single-leaf batch - ③ anchors one record "+(berr===null?"✓":"✗ ("+berr+")"),
+      "root "+bundle.merkle.root+"<br>SHA256(0x00 ‖ leaf_bytes) "+want+
+      "<br>siblings "+((bundle.merkle.siblings||[]).length)+" · directions "+((bundle.merkle.directions||[]).length));
+  }catch(e){ R.step(n,"ins_batch","bad",n+" · Single-leaf batch - error",err(e)); }
+  n++;
+
+  // 26 - the ONLY step that can say the envelope is published (spec 5.1). The
+  // browser fetches nothing on its own: the on-chain panel hands the raw
+  // witness-bearing transaction back through opts.chainRevealTxHex.
+  const refused=R.steps.some(s=>s.key.indexOf("ins_")===0&&s.state==="bad");
+  const fetched=opts&&opts.chainRevealTxHex;
+  if(!raw){
+    R.step(n,"ins_publication","undet",n+" · Publication - UNDETERMINED, this bundle carries no reveal transaction",
+      "publication: committed. The anchor's aux commits an envelope_root, but the envelope bytes are not here to compare.");
+    if(!refused) R.axes.publication="committed";
+  } else if(!fetched){
+    R.step(n,"ins_publication","undet",n+" · Publication - UNDETERMINED, no Bitcoin source was consulted",
+      "publication: committed. The issuer signature bytes are committed as the anchor's aux; that the reveal was PUBLISHED is a "+
+      "separate fact - use the on-chain panel below (any Bitcoin source, never BitCert) to compare the witness-bearing "+
+      "transaction with this bundle's reveal_tx_hex.");
+    if(!refused) R.axes.publication="committed";
+  } else if(String(fetched).toLowerCase()===String(raw).toLowerCase()){
+    R.step(n,"ins_publication","ok",n+" · Publication - the reveal transaction on Bitcoin is byte-identical to this bundle's ✓",
+      (String(fetched).length/2)+" bytes compared, witness included");
+    if(!refused) R.axes.publication="published";
+  } else if(!chainWitnessSeen(String(fetched),ins?ins.input_index:0)){
+    R.step(n,"ins_publication","undet",n+" · Publication - UNDETERMINED, this source returned no witness data",
+      "publication stays `committed` - ask a source that serves the raw transaction with its witness");
+    if(!refused) R.axes.publication="committed";
+  } else {
+    R.step(n,"ins_publication","bad",n+" · Publication - the transaction on Bitcoin is NOT this bundle's reveal ✗",
+      "the witness served for this txid differs from reveal_tx_hex, so the envelope in this bundle is not the one that was published");
+  }
+  return R;
+}
+
 async function runV4(bundle, opts){
   opts=opts||{};
   const v5=bundle.schema===SCHEMA_V5;   // single-signature v5 (§12.8): adds MUST 3/11/12 + the 0x04 branch
@@ -2095,7 +2428,11 @@ async function runV4(bundle, opts){
     else if(decoded.version!==OP_RETURN_V31_VERSION) R.step(1,"payload","bad","1 · Anchor payload - version 0x"+decoded.version.toString(16).padStart(2,"0")+", v4 requires 0x1F","a legacy (0x1E) anchor cannot be presented as identity-bound");
     else if(decoded.flags & ~FLAGS_DEFINED_MASK_V31) R.step(1,"payload","bad","1 · Anchor payload - undefined flag bits 0x"+decoded.flags.toString(16).padStart(2,"0"));
     else if(!(decoded.flags & FLAG_IDENTITY_BOUND)) R.step(1,"payload","bad","1 · Anchor payload - IDENTITY_BOUND (bit 1) not set","this anchor is not a bound batch; a v4 bundle cannot ride on it");
-    else if(decoded.flags & FLAG_WITNESS_PRESENT) R.step(1,"payload","warn","1 · Anchor payload - v31, IDENTITY_BOUND + WITNESS_PRESENT","a bound batch with a witness is undefined in this revision; treated as a warning");
+    else if((decoded.flags & FLAG_WITNESS_PRESENT) && v5 && Object.prototype.hasOwnProperty.call(bundle,"inscription"))
+      R.step(1,"payload","ok","1 · Anchor payload - v31 (0x1F), flags 0b11, IDENTITY_BOUND + WITNESS_PRESENT (③ inscription)","batch_id: "+decoded.batch_id+"<br>aux_commitment: "+decoded.aux);
+    else if(decoded.flags & FLAG_WITNESS_PRESENT)
+      R.step(1,"payload","bad","1 · Anchor payload - WITNESS_PRESENT (bit 0) is set, but no ③ envelope is carried",
+        "flags 0b11 is the ③ discriminator (MUST 16): with bit 0 set the bundle MUST carry `inscription`.<br>This is a refusal, not a warning - the previous revision only warned here.");
     else R.step(1,"payload","ok","1 · Anchor payload - v31 (0x1F), flags 0b"+decoded.flags.toString(2).padStart(2,"0")+", IDENTITY_BOUND","batch_id: "+decoded.batch_id+"<br>aux_commitment: "+decoded.aux);
   }catch(e){ R.step(1,"payload","bad","1 · Anchor payload - error",err(e)); }
 
@@ -2235,7 +2572,10 @@ async function runV4(bundle, opts){
 
   // 10 · envelope_root
   { const env=bytesToHex(await envelopeRootNone()); const ok=eqHex(aux.envelope_root,env);
-    R.step(10,"envelope",ok?"ok":"bad","10 · Envelope root - "+(ok?"constant (envelope-none tag) ✓":"unexpected value ✗"),ok?"":"expected "+env); }
+    if(!ok&&v5&&Object.prototype.hasOwnProperty.call(bundle,"inscription"))
+      R.step(10,"envelope","ok","10 · Envelope root - an inscription envelope (③) is committed here ✓",
+        aux.envelope_root.toLowerCase()+"<br>recomputed from the reveal witness in the ③ steps below");
+    else R.step(10,"envelope",ok?"ok":"bad","10 · Envelope root - "+(ok?"constant (envelope-none tag) ✓":"unexpected value ✗"),ok?"":"expected "+env); }
 
   // 11 · aux recompute
   try{
@@ -2338,6 +2678,10 @@ async function runV4(bundle, opts){
 
   // 18 · on-chain - the browser has its own panel; here it is always the offline skip
   R.step(18,"onchain","skip","18 · On-chain confirmation - SKIPPED (offline)","txid: "+txid+"<br>use the on-chain panel below (any Bitcoin source, never BitCert) to confirm and compare block_time");
+
+  // 19+ · ③ inscription tier (MUST 14-26). Appended ONLY when the bundle claims
+  // it, so a bundle that does not is byte for byte the report it was before.
+  if(v5&&await inscriptionClaimed(bundle,decoded)) await inscriptionSteps(R,bundle,decoded,19,Rb,sBytes,opts);
   return R;
 }
 
@@ -2355,8 +2699,11 @@ function v5MultiSchemaProblems(b){
   if(!Array.isArray(b.signers)) p.push("signers must be an array");
   if(p.length) return p;
   if(b.issuer!==undefined&&b.issuer!==null) p.push("signers[] and an issuer section are mutually exclusive - one canonical envelope (§12.8)");
-  const KNOWN=["schema","bitcoin_network","generated_at","record","merkle","anchor","signers","subject","aux","presentation","chain"];
+  const KNOWN=["schema","bitcoin_network","generated_at","record","merkle","anchor","signers","subject","aux","presentation","chain","inscription"];
   for(const k of Object.keys(b)) if(!KNOWN.includes(k)&&k!=="issuer") p.push("unknown top-level key `"+k+"` (a v5 multi-signature bundle carries only: "+KNOWN.join(", ")+")");
+  if(Object.prototype.hasOwnProperty.call(b,"inscription")) p.push.apply(p,inscriptionSchemaProblems(b.inscription));
+  for(const k of Object.keys(b.anchor)) if(!ANCHOR_FIELDS_V5.includes(k)&&k!=="witness_envelope")
+    p.push("anchor."+k+" is not an allowed field (a security field must not be able to hide under `anchor`)");
   if(b.reconciliation!==undefined&&b.reconciliation!==null) p.push("v5 does not allow `reconciliation`");
   if(b.anchor.witness_envelope!==undefined&&b.anchor.witness_envelope!==null) p.push("v5 does not allow `witness_envelope`");
   const rec=b.record, pre=rec.preimage;
@@ -2487,7 +2834,11 @@ async function runV5Multi(bundle, opts){
     else if(decoded.version!==OP_RETURN_V31_VERSION) R.step(1,"payload","bad","1 · Anchor payload - version 0x"+decoded.version.toString(16).padStart(2,"0")+", v5 requires 0x1F","a legacy (0x1E) anchor cannot be presented as identity-bound");
     else if(decoded.flags & ~FLAGS_DEFINED_MASK_V31) R.step(1,"payload","bad","1 · Anchor payload - undefined flag bits 0x"+decoded.flags.toString(16).padStart(2,"0"));
     else if(!(decoded.flags & FLAG_IDENTITY_BOUND)) R.step(1,"payload","bad","1 · Anchor payload - IDENTITY_BOUND (bit 1) not set","this anchor is not a bound batch; a v5 bundle cannot ride on it");
-    else if(decoded.flags & FLAG_WITNESS_PRESENT) R.step(1,"payload","warn","1 · Anchor payload - v31, IDENTITY_BOUND + WITNESS_PRESENT","a bound batch with a witness is undefined in this revision; treated as a warning");
+    else if((decoded.flags & FLAG_WITNESS_PRESENT) && Object.prototype.hasOwnProperty.call(bundle,"inscription"))
+      R.step(1,"payload","ok","1 · Anchor payload - v31 (0x1F), flags 0b11, IDENTITY_BOUND + WITNESS_PRESENT (③ inscription)","batch_id: "+decoded.batch_id+"<br>aux_commitment: "+decoded.aux);
+    else if(decoded.flags & FLAG_WITNESS_PRESENT)
+      R.step(1,"payload","bad","1 · Anchor payload - WITNESS_PRESENT (bit 0) is set, but no ③ envelope is carried",
+        "flags 0b11 is the ③ discriminator (MUST 16): with bit 0 set the bundle MUST carry `inscription`.<br>This is a refusal, not a warning - the previous revision only warned here.");
     else R.step(1,"payload","ok","1 · Anchor payload - v31 (0x1F), flags 0b"+decoded.flags.toString(2).padStart(2,"0")+", IDENTITY_BOUND","batch_id: "+decoded.batch_id+"<br>aux_commitment: "+decoded.aux);
   }catch(e){ R.step(1,"payload","bad","1 · Anchor payload - error",err(e)); }
 
@@ -2642,7 +2993,10 @@ async function runV5Multi(bundle, opts){
 
   // 12 · envelope_root
   { const env=bytesToHex(await envelopeRootNone()); const ok=eqHex(aux.envelope_root,env);
-    R.step(12,"envelope",ok?"ok":"bad","12 · Envelope root - "+(ok?"constant (envelope-none tag) ✓":"unexpected value ✗"),ok?"":"expected "+env); }
+    if(!ok&&Object.prototype.hasOwnProperty.call(bundle,"inscription"))
+      R.step(12,"envelope","ok","12 · Envelope root - an inscription envelope (③) is committed here ✓",
+        aux.envelope_root.toLowerCase()+"<br>recomputed from the reveal witness in the ③ steps below");
+    else R.step(12,"envelope",ok?"ok":"bad","12 · Envelope root - "+(ok?"constant (envelope-none tag) ✓":"unexpected value ✗"),ok?"":"expected "+env); }
 
   // 13 · aux recompute
   try{
@@ -2765,6 +3119,9 @@ async function runV5Multi(bundle, opts){
   // 21 · on-chain - the browser has its own panel; here it is always the offline skip
   R.step(21,"onchain","skip","21 · On-chain confirmation - SKIPPED (offline)","txid: "+txid+"<br>use the on-chain panel below (any Bitcoin source, never BitCert) to confirm and compare block_time");
   R.info.signersSummary=signers.map((e,i)=>({role:e.role, alg:e.alg, keyId:e.key_id, listed:proven.some(x=>x.i===i)}));
+
+  // 22+ · ③ inscription tier (MUST 14-26) - appended only when claimed
+  if(await inscriptionClaimed(bundle,decoded)) await inscriptionSteps(R,bundle,decoded,22,Rb,sBytes,opts);
   return R;
 }
 
@@ -3178,7 +3535,11 @@ function renderAxes(axes){
   if(!axes){ box.hidden=true; box.innerHTML=""; return; }
   const cls=v=>/✓|confirmed/.test(v)?"on":/✗/.test(v)?"no":/not/.test(v)?"off":"";
   box.innerHTML='<span class="axis '+cls(axes.attribution)+'">'+esc(tr("attribution"))+': '+esc(trAxis(axes.attribution))+'</span>'+
-                '<span class="axis '+cls(axes.presenter)+'">'+esc(tr("presenter"))+': '+esc(trAxis(axes.presenter))+'</span>';
+                '<span class="axis '+cls(axes.presenter)+'">'+esc(tr("presenter"))+': '+esc(trAxis(axes.presenter))+'</span>'+
+                // ③ only: a bundle that carries no inscription says nothing here
+                (axes.publication===undefined ? "" :
+                 '<span class="axis '+(axes.publication==="published"?"on":axes.publication==="refused"?"no":"off")+'">'+
+                 esc(tr("publication"))+': '+esc(trAxis(axes.publication))+'</span>');
   box.hidden=false;
 }
 function verdictIdle(msg, sub){
@@ -3792,11 +4153,18 @@ function gridCells(id, cells){
   $(id).innerHTML=cells.filter(c=>c&&c[1]!==undefined&&c[1]!==null&&c[1]!=="").map(c=>
     '<div class="bcell"><div class="k">'+esc(c[0])+'</div><div class="v'+(c[2]?" hash":"")+'">'+esc(c[1])+'</div></div>').join("");
 }
-async function verifyV4UI(bundle){
+/* The bundle the on-chain panel is looking at, so MUST 26 (③) can re-run the
+   whole verification with the witness-bearing transaction the user's own source
+   served. Never a BitCert endpoint - whatever URL is in the explorer field. */
+let ocBundle=null;
+
+async function verifyV4UI(bundle, chainRevealTxHex){
+  ocBundle=bundle;
   renderSummary(bundle);
   renderStep("ok","Schema "+bundle.schema+" · identity-bound issuance"+(bundle.bitcoin_network?" · network: "+bundle.bitcoin_network:""));
   status("verifying the identity-bound issuance");
   const opts=await collectV4Opts();
+  if(chainRevealTxHex) opts.chainRevealTxHex=chainRevealTxHex;
   if(bundle.anchor && bundle.anchor.op_return_payload_hex) renderStrip(bundle.anchor.op_return_payload_hex, false);
   const R=bundle.schema===SCHEMA_V5 ? await runV5(bundle, opts) : await runV4(bundle, opts);
   const stateOf=k=>{ const s=R.steps.find(x=>x.key===k); return s?s.state:"idle"; };
@@ -3953,6 +4321,26 @@ async function checkOnChain(){
   } catch(e){
     note.textContent=tr("Could not reach explorer")+" ("+e.message+"). "+
       tr("For regtest/private anchors point this at your self-hosted explorer or your own bitcoind. The offline checks above are already proven.");
+    return;
+  }
+  // MUST 26 (③): fetch the RAW transaction, witness included, and re-run the
+  // whole verification against it. This is the only step that can move
+  // `publication` from `committed` to `published`.
+  if(!(ocBundle&&Object.prototype.hasOwnProperty.call(ocBundle,"inscription"))) return;
+  const before=note.textContent;
+  try{
+    const r=await fetch(base+"/api/tx/"+txid+"/hex");
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const raw=(await r.text()).trim();
+    if(!/^[0-9a-fA-F]+$/.test(raw)) throw new Error(tr("that source did not return raw transaction hex"));
+    reset();
+    await verifyV4UI(ocBundle, raw);
+    $("ocResult").hidden=false;
+    $("ocResult").textContent=before+" · "+tr("reveal transaction compared with your source (see the ③ publication step)");
+  }catch(e){
+    $("ocResult").hidden=false;
+    $("ocResult").textContent=before+" · "+tr("could not fetch the raw transaction")+" ("+e.message+"). "+
+      tr("The ③ publication step stays undetermined; the offline checks above are already proven.");
   }
 }
 

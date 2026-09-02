@@ -36,7 +36,10 @@ for (const row of oracle.rows) {
   const diffs = [];
   if (r.grade !== row.grade) diffs.push("grade js=" + r.grade + " py=" + row.grade);
   if (r.exitCode !== row.exit_code) diffs.push("exit js=" + r.exitCode + " py=" + row.exit_code);
-  for (const ax of ["attribution", "presenter"]) if (r.axes[ax] !== row.axes[ax]) diffs.push(ax + " js=" + JSON.stringify(r.axes[ax]) + " py=" + JSON.stringify(row.axes[ax]));
+  // `publication` (③, spec 5.1) appears ONLY for a bundle that claims the
+  // inscription tier - its absence is itself part of the contract, so an
+  // undefined on one side and a value on the other is a drift.
+  for (const ax of ["attribution", "presenter", "publication"]) if (r.axes[ax] !== row.axes[ax]) diffs.push(ax + " js=" + JSON.stringify(r.axes[ax]) + " py=" + JSON.stringify(row.axes[ax]));
   if (r.steps.length !== row.steps.length) diffs.push("step count js=" + r.steps.length + " py=" + row.steps.length);
   const n = Math.min(r.steps.length, row.steps.length);
   for (let i = 0; i < n; i++) {

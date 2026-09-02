@@ -77,7 +77,16 @@ jobs:
       - name: v5 - zk-core.js 0x10 / wallet / policy primitives match the engine KAT (27 negatives included)
         run: node fixtures/multisig/kat.mjs
 
-      - name: v5 - CLI exit-code matrix (0 valid / 1 rejected / 2 warning)
+      # ---- ③ inscription tier (frozen spec 2026-09-02, MUST 14-26) ----------
+      # The verifier ships BEFORE the issuing path: an older verifier marks a ③
+      # bundle REJECTED, indistinguishable from a forgery, so something able to
+      # read the first ③ bundle has to exist first. The engine KAT's 29 negatives
+      # are pinned by their ERROR IDENTIFIER in both implementations, and every
+      # one of them is also a complete v5 file in fixtures/v5/ins-neg-*.json.
+      - name: ③ - zk-core.js matches the engine KAT's inscription section (29 negatives included)
+        run: node fixtures/inscription/kat.mjs
+
+      - name: v5 - CLI exit-code matrix (0 valid / 1 rejected / 2 warning / 3 undetermined - ③ included)
         run: python3 fixtures/v5-rc-matrix.py
 
       - name: v5 - index.html runV5 reproduces the Python oracle (grade · axes · every step)

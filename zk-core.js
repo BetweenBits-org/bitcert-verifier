@@ -949,6 +949,170 @@ function assembleMultisigS(entries) {
   return zkCat(...parts);
 }
 
+
+/* ---------- tier 3 inscription envelope (docs/inscription-tier-spec-2026-09-02.md) ----------
+ * The reveal witness carries body = R(143) ‖ s, so the record AND the issuer
+ * signature bytes come back out of the envelope. MUST 19/20 make that recovery
+ * unambiguous: one encoding per body, and the recovered fields must re-serialise
+ * to the very same script. index.html keeps its lenient parseEnvelope() for the
+ * v1-v3 unified-witness path; nothing below is shared with it. */
+const ENVELOPE_TAG_V1 = "BC30/envelope/v1";                        // spec 2.3
+const INSC_PROTOCOL_TAG = "bcrt";                                  // spec 2.1
+const INSC_CONTENT_TYPE = "application/vnd.bitcert.sig.v1";        // spec 2.1
+const INSC_MAX_PUSH = 520;                                         // every chunk but the last is EXACTLY this
+const INSC_RECORD_LEN = 143;
+const INSC_BODY_MAX = INSC_RECORD_LEN + 8192;                      // 8335 (MUST 19)
+const INSC_ENVELOPE_ROOT_NONE_TAG = "BC30/envelope/none";          // ①② keep the constant
+const TAPROOT_ANNEX_PREFIX = 0x50, TAPROOT_MAX_MERKLE_DEPTH = 128;
+
+/** Refusal with a stable machine identifier in `.code` - the engine KAT's
+ * inscription.negative[].error strings (and verify.py's EnvelopeError). */
+function envError(code, detail) { const e = new Error(code + (detail ? ": " + detail : "")); e.code = code; return e; }
+
+/** BIP-340 lift_x: 32 bytes are an x-only KEY only if x < p and x is on the
+ * curve. MUST 20 needs it - a leaf whose key is not a point can never be spent
+ * and its script cannot be rebuilt. Returns {x, y} with y even. */
+function secpLiftX(x32) {
+  if (!(x32 instanceof Uint8Array) || x32.length !== 32) throw new Error("x-only key must be 32 bytes");
+  const x = zkBytesToBig(x32);
+  if (x >= ZK_P) throw new Error("x is not a canonical field element");
+  const y = zkSqrtP(M(x * x % ZK_P * x + 7n));
+  if (y === null) throw new Error("x is not on secp256k1");
+  return { x, y: (y & 1n) === 0n ? y : ZK_P - y };
+}
+
+/** The SHORTEST push that can carry this length (MUST 19). Not BIP-62
+ * MINIMALDATA: that would demand OP_1..OP_16 for single bytes 0x01..0x10, and
+ * those are opcodes - inside an envelope they are forbidden_opcode. Both
+ * readings refuse the same scripts. */
+function inscPush(data) {
+  const n = data.length;
+  if (n === 0 || n > INSC_MAX_PUSH) throw envError("non_canonical_chunking", "push of " + n + " bytes (1.." + INSC_MAX_PUSH + ")");
+  if (n < 0x4c) return zkCat(Uint8Array.of(n), data);
+  if (n <= 0xff) return zkCat(Uint8Array.of(0x4c, n), data);
+  return zkCat(Uint8Array.of(0x4d, n & 255, (n >> 8) & 255), data);
+}
+
+/** spec 2.1 byte for byte - and MUST 20's reference serialisation:
+ *   <script_key(32 B x-only)> OP_CHECKSIG
+ *   OP_FALSE OP_IF <protocol_tag> <content_type> <body chunk…> OP_ENDIF   */
+function buildInscriptionScript(scriptKey, tag, contentType, body) {
+  if (scriptKey.length !== 32) throw envError("invalid_script_key", "script key must be 32 bytes");
+  const parts = [inscPush(scriptKey), Uint8Array.of(0xac, 0x00, 0x63), inscPush(tag), inscPush(contentType)];
+  for (let i = 0; i < body.length; i += INSC_MAX_PUSH) parts.push(inscPush(body.subarray(i, Math.min(i + INSC_MAX_PUSH, body.length))));
+  parts.push(Uint8Array.of(0x68));
+  return zkCat(...parts);
+}
+
+/** MUST 19 + MUST 20. Returns {scriptKey, protocolTag, contentType, body,
+ * chunkLens} or throws. Only `not_an_envelope` means "nothing was claimed". */
+function parseInscriptionEnvelope(script) {
+  if (!(script instanceof Uint8Array)) throw envError("not_an_envelope", "script must be bytes");
+  if (script.length < 37 || script[0] !== 0x20 || script[33] !== 0xac || script[34] !== 0x00 || script[35] !== 0x63)
+    throw envError("not_an_envelope", "script does not open with <32 B key> OP_CHECKSIG OP_FALSE OP_IF");
+  const scriptKey = script.subarray(1, 33);
+  let o = 36, closed = false;
+  const n = script.length, pushes = [];
+  while (o < n) {
+    const op = script[o++];
+    if (op === 0x68) { closed = true; break; }                       // OP_ENDIF
+    if (op === 0x63 || op === 0x64) throw envError("nested_conditional", "0x" + op.toString(16) + " inside the envelope");
+    if (op === 0x00) throw envError("forbidden_opcode", "OP_0 inside the envelope");
+    let ln;
+    if (op < 0x4c) ln = op;
+    else if (op === 0x4c) {
+      if (n - o < 1) throw envError("truncated_push", "OP_PUSHDATA1 length byte past the script");
+      ln = script[o++];
+      if (ln < 0x4c) throw envError("non_minimal_push", ln + " bytes pushed with OP_PUSHDATA1");
+    } else if (op === 0x4d) {
+      if (n - o < 2) throw envError("truncated_push", "OP_PUSHDATA2 length past the script");
+      ln = script[o] + (script[o + 1] << 8); o += 2;
+      if (ln <= 0xff) throw envError("non_minimal_push", ln + " bytes pushed with OP_PUSHDATA2");
+    } else if (op === 0x4e) throw envError("non_minimal_push", "OP_PUSHDATA4 cannot be the shortest form");
+    else throw envError("forbidden_opcode", "opcode 0x" + op.toString(16) + " inside the envelope");
+    if (ln > INSC_MAX_PUSH) throw envError("non_canonical_chunking", "push of " + ln + " bytes exceeds " + INSC_MAX_PUSH);
+    if (n - o < ln) throw envError("truncated_push", "push of " + ln + " bytes runs past the script");
+    pushes.push(script.subarray(o, o + ln)); o += ln;
+  }
+  if (!closed) throw envError("unterminated_envelope", "no OP_ENDIF");
+  if (o !== n) throw envError("trailing_bytes_after_endif", (n - o) + " byte(s) after OP_ENDIF");
+  if (pushes.length < 3) throw envError("empty_body", "envelope carries no body chunk");
+  const tag = pushes[0], contentType = pushes[1], chunks = pushes.slice(2);
+  for (let i = 0; i < chunks.length - 1; i++)
+    if (chunks[i].length !== INSC_MAX_PUSH)
+      throw envError("non_canonical_chunking", "chunk of " + chunks[i].length + " bytes before the last one (must be " + INSC_MAX_PUSH + ")");
+  const body = zkCat(...chunks);
+  if (body.length === 0) throw envError("empty_body", "body is zero bytes");
+  if (body.length > INSC_BODY_MAX) throw envError("body_too_large", "body is " + body.length + " bytes, cap " + INSC_BODY_MAX);
+  try { secpLiftX(scriptKey); } catch (e) { throw envError("invalid_script_key", e.message); }
+  // MUST 20 - rebuild the WHOLE script from what was recovered and demand byte
+  // identity. This is the line that closes every parser difference.
+  const rebuilt = buildInscriptionScript(scriptKey, tag, contentType, body);
+  if (rebuilt.length !== script.length || !rebuilt.every((b, i) => b === script[i]))
+    throw envError("reserialization_mismatch", "the recovered fields do not re-serialise to this script");
+  return { scriptKey, protocolTag: tag, contentType, body, chunkLens: chunks.map((c) => c.length) };
+}
+
+/** MUST 18. Read ONLY the indexed stack item (no scanning) after judging the
+ * stack: 2+ items, a well-formed control block last, no annex. */
+function inscriptionWitnessScript(items, index) {
+  if (!Array.isArray(items)) throw envError("no_witness", "this input carries no witness");
+  if (items.length >= 2 && items[items.length - 1].length > 0 && items[items.length - 1][0] === TAPROOT_ANNEX_PREFIX)
+    throw envError("annex_present", "last stack item starts with 0x50");
+  if (items.length < 2) throw envError("witness_too_short", "script-path spend needs [script, control block]");
+  const cb = items[items.length - 1];
+  if (cb.length < 33 || (cb.length - 33) % 32 !== 0 || (cb.length - 33) / 32 > TAPROOT_MAX_MERKLE_DEPTH || (cb[0] & 0xfe) !== 0xc0)
+    throw envError("malformed_control_block", "control block is 0xc0/0xc1 followed by 32k bytes, got " + cb.length + " bytes");
+  if (!Number.isInteger(index) || index < 0 || index >= items.length - 1)
+    throw envError("witness_index_out_of_range", "witness_item_index " + index + " is not a script item of a " + items.length + "-item stack");
+  return items[index];
+}
+
+/** spec 2.3 - the ONLY envelope_root preimage. The length prefixes stop
+ * (tag, content_type, body) from being re-cut into another triple with the same
+ * bytes; tag and content_type are inside so they are committed, not free text. */
+async function envelopeRootV1(tag, contentType, body) {
+  const u16 = (n) => Uint8Array.of((n >> 8) & 255, n & 255);
+  const u32 = (n) => Uint8Array.of((n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+  return zkSha256(zkCat(new TextEncoder().encode(ENVELOPE_TAG_V1),
+                        u16(tag.length), tag, u16(contentType.length), contentType, u32(body.length), body));
+}
+async function envelopeRootNoneHex() {
+  const h = await zkSha256(new TextEncoder().encode(INSC_ENVELOPE_ROOT_NONE_TAG));
+  return msKeyHex(h);
+}
+
+/** spec 3 + 4 (MUST 15/16): flags 0b11 is the ONLY ③ discriminator and the
+ * three claims stand or fall together
+ *   flags bit0 = 1 <-> aux.envelope_root != SHA256("BC30/envelope/none")
+ *                  <-> `inscription` present
+ * Returns [code, detail] or [null, null]. Pure, so the engine KAT's anchor
+ * negatives pin this decision directly. */
+function inscriptionEquivalenceError(flags, envelopeRootHex, noneRootHex, hasInscription) {
+  const hasEnv = String(envelopeRootHex || "").toLowerCase() !== noneRootHex;
+  if (flags === null || flags === undefined) return ["flags_unavailable", "no 86-byte payload to read flags from"];
+  if (!(flags & 0b10)) return ["flags_not_identity_bound",
+    "flags 0b" + flags.toString(2).padStart(2, "0") + ": the legacy unified-witness path never sets bit 1, so 0b11 stays the sole discriminator"];
+  if (flags & 0b01) {
+    if (!hasEnv) return ["flags_envelope_root_mismatch", "WITNESS_PRESENT is set but aux.envelope_root is the envelope-none constant"];
+    if (!hasInscription) return ["inscription_missing", "WITNESS_PRESENT is set but the bundle carries no `inscription` section"];
+    return [null, null];
+  }
+  if (hasEnv) return ["flags_envelope_root_mismatch", "aux.envelope_root is not the constant but WITNESS_PRESENT (bit 0) is clear"];
+  if (hasInscription) return ["inscription_unexpected", "`inscription` is present but WITNESS_PRESENT (bit 0) is clear"];
+  return [null, null];
+}
+
+/** MUST 25 - ③ is always a one-leaf batch: an empty path, and the root IS
+ * H_leaf(leaf_bytes). Returns an error id or null. */
+async function inscriptionBatchError(merkle, leafBytes) {
+  const want = msKeyHex(await zkSha256(zkCat(Uint8Array.of(0x00), leafBytes)));
+  const empty = (a) => Array.isArray(a) && a.length === 0;
+  if (!empty(merkle.siblings) || !empty(merkle.directions) || String(merkle.root || "").toLowerCase() !== want)
+    return "not_single_leaf_batch";
+  return null;
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = { verifyZk, zkDeriveNUMS, zkSec1Encode, zkSec1Decode, zkCsDigest, ZK_DST, ZK_G,
     // P-256 / WebAuthn (bundle §9–§10)
@@ -958,5 +1122,9 @@ if (typeof module !== "undefined" && module.exports) {
     // secp256k1 / cosign / multi-signature (bundle §12)
     ZK_P, ZK_N, SECP_HALF_N, secpDecompress, secpIsLowS, secp256k1VerifyDigest, secp256k1RecoverPubkey,
     bitcoinMessageDigest, COSIGN_TAG, COSIGN_ROLE_ORD, cosignMessage,
-    parseInnerSig, parseMultisigS, assembleMultisigS, MULTISIG_MAX_LEN };
+    parseInnerSig, parseMultisigS, assembleMultisigS, MULTISIG_MAX_LEN,
+    // ③ inscription tier (frozen spec 2026-09-02)
+    ENVELOPE_TAG_V1, INSC_PROTOCOL_TAG, INSC_CONTENT_TYPE, INSC_MAX_PUSH, INSC_BODY_MAX,
+    secpLiftX, inscPush, buildInscriptionScript, parseInscriptionEnvelope, inscriptionWitnessScript,
+    envelopeRootV1, envelopeRootNoneHex, inscriptionEquivalenceError, inscriptionBatchError, msKeyHex };
 }

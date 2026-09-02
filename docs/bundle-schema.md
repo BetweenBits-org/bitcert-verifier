@@ -1199,3 +1199,136 @@ axis and step. They grade as:
 - **warning → exit 2**: `subject-consent` `key_id != subject_ref` (MUST 13).
 
 The verifier grade scale is unchanged: `0` valid · `1` rejected · `2` warning.
+
+---
+
+## 13. `inscription` - the ③ tier (v5, MUST 14-26)
+
+Frozen by `docs/inscription-tier-spec-2026-09-02.md` in the platform
+repository; this section is what the two verifiers in THIS repository enforce.
+It is **additive**: the 143-byte record, the 86-byte payload, the `aux` fold and
+the `0x10` framing are untouched, and a ③ bundle passes MUST 1-13 first.
+
+A ③ issuance publishes the issuer's own signature bytes: the reveal transaction
+that carries the anchor output ALSO carries a taproot script-path witness whose
+tapscript envelope holds `body = R(143) ‖ s`. Nothing about the document is
+published; `R` is the 143-byte record (which carries `doc_sha256`, never the
+document) and `s` is the issuer signature envelope.
+
+```jsonc
+"inscription": {
+  "reveal_txid": "…64 hex…",     // MUST equal anchor.reveal_txid - one transaction
+  "input_index": 0,              // which input's witness
+  "witness_item_index": 1        // which stack item is the tapscript
+}
+```
+
+**Exactly these three fields.** `protocol_tag` and `content_type` are
+deliberately absent: they are recovered from the witness, never read from JSON.
+Unknown keys under `inscription` **or under `anchor`** are refused (a security
+field must not be able to hide where an older verifier would ignore it).
+
+### 13.1 the discriminator
+
+```
+payload flags bit0 = 1  ⇔  aux.envelope_root ≠ SHA256("BC30/envelope/none")  ⇔  `inscription` present
+```
+
+All three or none - any disagreement is a refusal, not a warning. `flags`
+`0b11` (`WITNESS_PRESENT | IDENTITY_BOUND`) is ③'s only discriminator, and it
+holds only because the legacy unified-witness path (§6 of
+`UNIFIED-WITNESS-CONTRACT.md`) never sets bit 1. A v4 bundle carrying
+`inscription`, or a v4 `envelope_root` that is not the constant, is refused.
+
+### 13.2 the envelope
+
+```
+<script_key(32 B x-only)> OP_CHECKSIG
+OP_FALSE OP_IF <"bcrt"> <"application/vnd.bitcert.sig.v1"> <body chunk…> OP_ENDIF
+```
+
+Every chunk but the last is **exactly 520 bytes**, every push uses the shortest
+form that can carry its length, and the taproot internal key is always the
+BIP-341 NUMS point (so the commit output has no key path and the envelope cannot
+be spent away). The parser is strict and separate from the lenient v1-v3
+`parse_envelope`: one `OP_IF`/`OP_ENDIF`, no `OP_ELSE`/`OP_NOTIF`, no nesting,
+no truncated push, no trailing byte after `OP_ENDIF`, no empty body, and a
+`143 + 8192` byte reassembly cap.
+
+The rule that makes three implementations agree is **re-serialisation
+identity**: rebuild the WHOLE script from the recovered
+`(script_key, protocol_tag, content_type, body)` and demand byte equality with
+the witness item. `script_key` is therefore recovered too, and 32 bytes that are
+not an x-only point are refused - such a leaf could never be satisfied.
+
+```
+envelope_root = SHA256("BC30/envelope/v1"
+                       ‖ len16(protocol_tag) ‖ protocol_tag
+                       ‖ len16(content_type) ‖ content_type
+                       ‖ len32(body)         ‖ body)
+```
+
+Length prefixes stop one byte string from being re-cut into a different triple;
+tag and content type are inside the preimage so they are committed rather than
+free text. ①② keep the constant `SHA256("BC30/envelope/none")`.
+
+### 13.3 verifier obligations (MUST 14-26, on top of MUST 1-13)
+
+14. **Schema**: `inscription` only on v5, exactly three fields, unknown keys
+    under `anchor` refused.
+15. **Three-way equivalence** (§13.1). Any disagreement is a refusal.
+16. **Flags**: `0b11` only. Bit 0 without an envelope is a refusal (the earlier
+    revision warned here).
+17. **One transaction**: `inscription.reveal_txid == anchor.reveal_txid`.
+18. **Witness location**: read ONLY the indexed stack item, never scan. Stack of
+    2+ items, last item a `0xc0`/`0xc1` control block of `33 + 32k` bytes, annex
+    (last item starting `0x50`) refused.
+19. **Strict parse** (§13.2).
+20. **Re-serialisation identity** (§13.2).
+21. **Tag and type**: `protocol_tag == "bcrt"`,
+    `content_type == "application/vnd.bitcert.sig.v1"`, by equality. Neither is
+    ever displayed as text.
+22. **Record binding**: `body[0..143]` equals the `R` rebuilt from the bundle.
+23. **Signature binding**: `body[143..]` equals the `s` reassembled by §11/§12.5.
+24. **On-chain commitment**: recompute `envelope_root`, compare with
+    `aux.envelope_root`, and fold `aux` against payload bytes 54..86.
+25. **Single-leaf batch**: `merkle.siblings == []`, `merkle.directions == []`,
+    `merkle.root == SHA256(0x00 ‖ leaf_bytes)`.
+26. **Chain comparison (REQUIRED for `published`)**: fetch the raw transaction
+    WITH its witness from the Bitcoin source YOU choose
+    (`--explorer <url>` → `/api/tx/<txid>/hex`, never BitCert) and compare it
+    byte for byte with `anchor.reveal_tx_hex`.
+
+### 13.4 the `publication` axis
+
+Reported beside `attribution` and `presenter`, and **only** for a bundle that
+claims ③:
+
+| `publication` | condition |
+|---|---|
+| `published` | MUST 14-26, the witness-bearing transaction compared against a Bitcoin source |
+| `committed` | MUST 14-25 pass, 26 not performed (offline) |
+| `refused` | the ③ claim itself did not hold |
+
+Offline, MUST 26 cannot run, so a ③ bundle grades **UNDETERMINED (exit 3)** on
+that step while the record verdict from MUST 1-13 stands unchanged - the tier
+never turns a valid record into a rejected one, and never promotes itself to
+VALID without the chain. A source that cannot be reached, or that serves the
+transaction without witness data, leaves the step undetermined; a source that
+serves a DIFFERENT witness for that txid refuses it (the envelope in the bundle
+is then not the one that was published).
+
+**Wording rule**: an offline verdict never says the envelope is on Bitcoin. The
+strongest offline claim is *"the issuer signature bytes are committed as the
+anchor's `aux`"* - the witness is read from the bundle, and `reveal_txid`
+deliberately does not commit to it.
+
+### 13.5 fixtures
+
+`fixtures/v5/ins-*.json` are complete v5 files built from the engine KAT's own
+bytes (record, issuer assertion, trust/status lists, both frozen envelopes, the
+real commit+reveal pair). Two positives (single-chunk and `[520, 335]`
+chunking), the undetermined case (`reveal_tx_hex` absent) and one file per
+engine-KAT negative, each otherwise consistent so exactly the named gate trips -
+asserted against the KAT's own error identifier. `fixtures/inscription/kat.mjs`
+and `verify-cli/verify.py --selftest` replay the KAT section itself.

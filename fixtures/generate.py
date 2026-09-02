@@ -286,7 +286,8 @@ POLICY_OPEN = {"document_type": "audit", "jurisdiction": "GENERIC",
 # Pin the secp256k1 signer against the engine KAT (Rust secp256k1 crate, RFC
 # 6979): a drift would silently re-sign every v5 fixture with different bytes.
 with open(os.path.join(HERE, "bc30-v2-vectors.json"), "r", encoding="utf-8") as _f:
-    _wk = json.load(_f)["wallet"]
+    KAT = json.load(_f)
+_wk = KAT["wallet"]
 assert WALLET_PUB.hex() == _wk["public_key"], "wallet seed/pubkey drift vs engine KAT"
 assert wallet_sign_rs(WALLET_PRIV, bytes.fromhex(_wk["issuance_digest"])).hex() == _wk["signature_rs"], \
     "secp256k1 RFC 6979 signer drift vs engine KAT"
@@ -648,6 +649,203 @@ def assemble_v5_bundle(name, signer_specs, subject="pubkey", subject_pub=None, p
         bundle["subject"] = {"curve_id": V.CURVE_P256, "public_key": subject_pub.hex()}
     return bundle, {"leaf_input": li, "m": m, "R": R, "s": s, "salt": salt, "aux": aux, "tl_root": tl_root}
 
+# ---------------- ③ inscription tier (docs/inscription-tier-spec-2026-09-02.md) ----------------
+# The ③ fixtures are built from the ENGINE KAT's own bytes, not from this file's
+# test keys: the record, the issuer assertion, the trust/status lists, the
+# envelope scripts, the anchor and the real commit+reveal pair all come from
+# fixtures/bc30-v2-vectors.json. That makes fixtures/v5/ins-*.json the complete
+# v5 files the frozen spec 9.1 asks for - the engine KAT keeps only the ③ slice.
+INS = KAT["inscription"]
+INS_ISSUER_TL = [e for e in KAT["tl_entries_three"] if e["key_id"] == KAT["tl_key_id"]][0]
+INS_BLOCK_TIME = BLOCK_TIME                      # inside the KAT key's validity window
+
+def tx_parts(hex_str):
+    """Full (de)serialisation of a raw transaction - parse_tx() in verify.py
+    deliberately drops the witness, and the ③ fixtures need to re-emit it."""
+    r = V._R(bytes.fromhex(hex_str))
+    version = r.take(4)
+    segwit = r.b[r.o:r.o + 2] == b"\x00\x01"
+    if segwit:
+        r.take(2)
+    vin = r.varint()
+    inputs = []
+    for _ in range(vin):
+        prev = r.take(36)
+        script = r.take(r.varint())
+        inputs.append({"prev": prev, "script": script, "seq": r.take(4)})
+    outputs = []
+    for _ in range(r.varint()):
+        value = r.take(8)
+        outputs.append({"value": value, "script": r.take(r.varint())})
+    witnesses = []
+    if segwit:
+        for _ in range(vin):
+            witnesses.append([r.take(r.varint()) for _ in range(r.varint())])
+    return {"version": version, "inputs": inputs, "outputs": outputs,
+            "witnesses": witnesses, "locktime": r.take(4)}
+
+def tx_hex(tx):
+    p = [tx["version"]]
+    if tx["witnesses"]:
+        p.append(b"\x00\x01")
+    p.append(V._enc_varint(len(tx["inputs"])))
+    for i in tx["inputs"]:
+        p += [i["prev"], V._enc_varint(len(i["script"])), i["script"], i["seq"]]
+    p.append(V._enc_varint(len(tx["outputs"])))
+    for o in tx["outputs"]:
+        p += [o["value"], V._enc_varint(len(o["script"])), o["script"]]
+    for w in tx["witnesses"]:
+        p.append(V._enc_varint(len(w)))
+        for item in w:
+            p += [V._enc_varint(len(item)), item]
+    p.append(tx["locktime"])
+    return b"".join(p).hex()
+
+def anchor_output_script(payload):
+    return b"\x6a\x4c" + bytes([len(payload)]) + payload
+
+def respin_reveal(raw_hex, witness=None, payload=None, input_index=0):
+    """Return a reveal transaction with a different witness and/or 86-byte
+    payload. Swapping the WITNESS leaves the txid untouched (that is the whole
+    point of the tier 3 threat model); changing the payload does not, so the
+    caller re-reads the txid from the result."""
+    tx = tx_parts(raw_hex)
+    if witness is not None:
+        tx["witnesses"][input_index] = [bytes(x) for x in witness]
+    if payload is not None:
+        tx["outputs"][0]["script"] = anchor_output_script(payload)
+    return tx_hex(tx)
+
+def assemble_inscription_bundle(envelope="single", flags=0b11, envelope_root=None,
+                                with_inscription=True, witness=None, witness_item_index=None,
+                                merkle=None, schema="bitcert-proof-bundle/v5", drop_reveal_tx=False):
+    """A complete ③ bundle over the engine KAT's record. `envelope` picks which
+    of the two frozen envelopes is revealed: "single" (s_webauthn, one chunk) or
+    "multisig" (multisig.s, chunks [520, 335] - the 520-byte rule in force).
+
+    Everything the verifier recomputes stays internally consistent, so a fixture
+    trips exactly the gate it is named after: the payload is rebuilt from the
+    flags / envelope_root / merkle root actually given here."""
+    h = bytes.fromhex
+    env = INS["envelopes"][envelope]
+    multi = envelope == "multisig"
+    leaf_input = h(env["leaf_input"])
+    env_root = h(env["envelope_root"]) if envelope_root is None else h(envelope_root)
+
+    # trust list: the KAT's single-entry list (the root the engine folds into aux)
+    tl = {"issuer_id": INS_ISSUER_TL["issuer_id"], "key_id": INS_ISSUER_TL["key_id"],
+          "curve_id": INS_ISSUER_TL["curve_id"], "public_key": INS_ISSUER_TL["public_key"],
+          "valid_from": INS_ISSUER_TL["valid_from"], "valid_to": INS_ISSUER_TL["valid_to"],
+          "revoked_at": INS_ISSUER_TL["revoked_at"]}
+    tl_root = V.leaf_hash(V.tl_leaf(tl_entry_bytes_of(tl)))
+    assert tl_root.hex() == KAT["tl_root_single"]
+
+    # status list: the KAT's revoked set, with an exclusion proof for THIS leaf
+    smt = SMT()
+    for r in KAT["sl_revoked"]:
+        smt.insert(h(r["key"]), h(r["value"]))
+    assert smt.root().hex() == KAT["sl_root"]
+    sl_proof = smt.prove(leaf_input)
+
+    aux_commit = V.aux_commitment(tl_root, h(KAT["sl_root"]), env_root)
+    root, single = single_leaf_merkle(leaf_input)
+    merkle_section = single if merkle is None else dict(merkle)
+    payload = V.bc30_v31(h(merkle_section["root"]), h(KAT["op_return_batch_id"]), aux_commit, flags=flags)
+
+    # The reveal transaction: the KAT's own commit+reveal pair for the single
+    # envelope (a real BIP-340 signature made without auxiliary randomness), and
+    # the same shape re-spun for anything this fixture changes.
+    wit = witness
+    if wit is None:
+        wit = ([h(x) for x in INS["reveal"]["witness"]] if not multi
+               else [bytes(64), h(env["script"]), h(env["control_block"])])
+    same_payload = payload.hex() == INS["anchor"]["op_return_v31"]
+    raw = respin_reveal(INS["reveal"]["reveal_tx_hex"], witness=wit,
+                        payload=None if same_payload else payload)
+    txid, got_payload = V.txid_from_raw(raw)
+    assert got_payload == payload.hex()
+
+    signers = None
+    issuer = None
+    if multi:
+        signers = []
+        for e in KAT["multisig"]["entries"]:
+            alg = {1: "webauthn-es256", 2: "es256-plain", 4: "wallet-secp256k1"}[e["inner_alg"]]
+            entry = {"role": e["role"], "alg": alg, "curve_id": e["curve_id"],
+                     "public_key": e["public_key"], "key_id": e["key_id"]}
+            if alg == "webauthn-es256":
+                entry["rp_id"] = KAT["rp_id"]
+                entry["assertion"] = {"authenticator_data": e["authenticator_data"],
+                                      "client_data_json": e["client_data_json"],
+                                      "signature_der": e["signature_der"]}
+            else:
+                entry["assertion"] = {"signature_rs": e["signature_rs"]}
+            if e["key_id"] == KAT["tl_key_id"]:
+                entry["tl_entry"] = dict(tl)
+                entry["tl_proof"] = {"leaf_index": 0, "siblings": [], "directions": []}
+            signers.append(entry)
+        assert V.assemble_multisig_s([(e["role"], h(e["key_id"]), h(e["inner_sig"]))
+                                      for e in KAT["multisig"]["entries"]]).hex() == KAT["multisig"]["s"]
+    else:
+        issuer = {"issuer_id": KAT["tl_issuer_id"], "key_id": KAT["tl_key_id"],
+                  "alg": "webauthn-es256", "rp_id": KAT["rp_id"],
+                  "assertion": {"authenticator_data": KAT["authenticator_data"],
+                                "client_data_json": KAT["client_data_json"],
+                                "signature_der": KAT["signature_der"]}}
+
+    anchor = {"reveal_txid": txid, "commit_txid": INS["reveal"]["commit_txid"],
+              "reveal_tx_hex": raw, "op_return_payload_hex": payload.hex(),
+              "confirmed": {"block_height": 142, "block_hash": "00" * 32,
+                            "confirmations": 6, "block_time": INS_BLOCK_TIME}}
+    if drop_reveal_tx:
+        del anchor["reveal_tx_hex"]
+    bundle = {
+        "schema": schema,
+        "bitcoin_network": "regtest",
+        "generated_at": "2026-06-21T00:10:00Z",
+        "record": {
+            "kind": "issuance",
+            "leaf_bytes": leaf_input.hex(),
+            "preimage": {
+                "scheme": "bc30-leaf-v2", "leaf_type": KAT["leaf_type"],
+                "record_salt": KAT["record_salt"], "doc_sha256": KAT["doc_sha256"],
+                "subject_type": KAT["subject_type"], "subject_ref": KAT["subject_ref_pubkey"],
+                "issued_at": KAT["issued_at"], "expires_at": KAT["expires_at"],
+                "policy": {"document_type": KAT["policy_document_type"],
+                           "jurisdiction": KAT["policy_jurisdiction"]},
+                "policy_hash": KAT["policy_hash"],
+            },
+            "descriptor": {"exchange_id": "demoex", "attestation_id": "att-inscription-" + envelope},
+        },
+        "merkle": merkle_section,
+        "anchor": anchor,
+        "subject": {"curve_id": V.CURVE_P256, "public_key": KAT["subject_pub33"]},
+        "aux": {"scheme": "bc30-aux-v2", "tl_root": tl_root.hex(), "sl_root": KAT["sl_root"],
+                "envelope_root": env_root.hex(), "sl_proof": sl_proof},
+    }
+    if multi:
+        bundle["signers"] = signers
+    else:
+        bundle["issuer"] = issuer
+        bundle["aux"]["tl_entry"] = dict(tl)
+        bundle["aux"]["tl_proof"] = {"leaf_index": 0, "siblings": [], "directions": []}
+    if with_inscription:
+        bundle["inscription"] = {"reveal_txid": txid, "input_index": INS["reveal"]["input_index"],
+                                 "witness_item_index": INS["reveal"]["witness_item_index"]
+                                 if witness_item_index is None else witness_item_index}
+    return bundle
+
+def check_inscription_section():
+    """Gate generation on the ③ section of the engine KAT copy, exactly as
+    check_v2_party_sections() gates the party-model sections: the same
+    kat_inscription_checks() that verify.py --selftest runs."""
+    results = V.kat_inscription_checks(KAT)
+    bad = [label for ok, label in results if not ok]
+    assert not bad, "engine KAT ③ section failed:\n  " + "\n  ".join(bad)
+    assert tx_hex(tx_parts(INS["reveal"]["reveal_tx_hex"])) == INS["reveal"]["reveal_tx_hex"], \
+        "transaction (de)serialiser is not a round trip"
+    return len(results)
+
 # ---------------- presentation (the /present blob a recipient hands the verifier) ----------------
 PRESENT_NONCE = bytes.fromhex("0f1e2d3c4b5a69788796a5b4c3d2e1f0")
 PRESENT_VERIFIER_ID = V.make_verifier_id("ci-fixture", bytes.fromhex("00112233445566778899aabbccddeeff"))
@@ -912,6 +1110,7 @@ def jdump(obj):
 def main():
     # party-model v2 KAT gate (validation only - see check_v2_party_sections)
     n_v2 = check_v2_party_sections()
+    n_ins = check_inscription_section()
 
     # ---- examples/01 - file artifact ----
     b01, _r01 = assemble_bundle(ART_LEAF, file_preimage(), "attestation",
@@ -1260,6 +1459,85 @@ def main():
     for rel in ("v5/neg-nested-alg.json", "v5/neg-tl-entry-only.json", "v5/neg-tl-proof-only.json",
                 "v5/neg-unknown-field.json", "v5/neg-envelope-both.json"):
         assert v5_step_state(rel, "schema") == "bad", rel
+    # ---- ③ inscription tier (frozen spec 2026-09-02, MUST 14-26) ----------------
+    # Two positives (one chunk, and the 520-byte chunking rule in force), the
+    # undetermined case, and one COMPLETE v5 file per engine-KAT negative. Each
+    # negative is otherwise fully consistent, so the gate it is named after is the
+    # only one that can trip - asserted below against the KAT's own error id.
+    h = bytes.fromhex
+    ins_want = {}
+
+    def wv5_ins(rel, bundle, exit_code, step_key=None, error=None):
+        wv5(rel, bundle)
+        ins_want[rel] = (exit_code, step_key, error)
+
+    b_is = assemble_inscription_bundle(envelope="single")
+    wv5_ins("v5/ins-valid-single.json", b_is, 3)
+    b_im = assemble_inscription_bundle(envelope="multisig")
+    wv5_ins("v5/ins-valid-multisig.json", b_im, 3)
+    wv5_ins("v5/ins-undet-no-reveal-tx.json",
+            assemble_inscription_bundle(envelope="single", drop_reveal_tx=True), 3)
+
+    INS_STAGE_STEP = {"envelope": "ins_envelope", "binding": "ins_binding", "witness": "ins_envelope",
+                      "anchor": "ins_anchor", "batch": "ins_batch", "bundle": "schema"}
+    kat_sig, kat_cb = h(INS["reveal"]["witness"][0]), h(INS["reveal"]["witness"][2])
+    for nc in INS["negative"]:
+        rel = "v5/ins-neg-%s.json" % nc["name"].replace("_", "-")
+        stage = nc["stage"]
+        if stage in ("envelope", "binding"):
+            b = assemble_inscription_bundle(witness=[kat_sig, h(nc["script"]), kat_cb])
+        elif stage == "witness":
+            b = assemble_inscription_bundle(witness=[h(x) for x in nc["witness"]],
+                                            witness_item_index=nc["witness_item_index"])
+        elif stage == "anchor":
+            b = assemble_inscription_bundle(flags=nc["flags"], envelope_root=nc["envelope_root"],
+                                            with_inscription=nc["has_inscription"])
+        elif stage == "batch":
+            b = assemble_inscription_bundle(merkle=nc["merkle"])
+        elif nc["name"] == "bundle_v4_with_inscription":
+            b = assemble_inscription_bundle(schema="bitcert-proof-bundle/v4")
+        elif nc["name"] == "bundle_inscription_unknown_field":
+            b = assemble_inscription_bundle()
+            b["inscription"][nc["offending_key"]] = nc["inscription"][nc["offending_key"]]
+        elif nc["name"] == "bundle_anchor_unknown_field":
+            b = assemble_inscription_bundle()
+            b["anchor"][nc["offending_key"]] = nc["anchor"][nc["offending_key"]]
+        else:                                     # bundle_signer_unknown_field
+            b = assemble_inscription_bundle(envelope="multisig")
+            for sgn in b["signers"]:
+                if sgn["role"] == nc["signer"]["role"]:
+                    sgn[nc["offending_key"]] = nc["signer"][nc["offending_key"]]
+        wv5_ins(rel, b, 1, INS_STAGE_STEP[stage], nc["error"] if stage != "bundle" else nc["offending_key"])
+
+    # Beyond the KAT: MUST 20 needs the script_key back, so a leaf whose key is
+    # not an x-only POINT cannot be re-serialised and is refused. And the anchor
+    # whitelist has to refuse a key the KAT never names.
+    bad_key_script = h(INS["envelopes"]["single"]["script"])
+    bad_key_script = b"\x20" + b"\xff" * 32 + bad_key_script[33:]
+    wv5_ins("v5/ins-neg-invalid-script-key.json",
+            assemble_inscription_bundle(witness=[kat_sig, bad_key_script, kat_cb]), 1,
+            "ins_envelope", "invalid_script_key")
+    b_ak = assemble_inscription_bundle()
+    b_ak["anchor"]["x_note"] = "a security field must not be able to hide here"
+    wv5_ins("v5/ins-neg-anchor-unknown-key.json", b_ak, 1, "schema", "x_note")
+
+    # sanity: the exit code AND the gate that produced it, per the KAT contract
+    ins_rows = {r["file"]: r for r in v5_expected if r["file"] in ins_want}
+    assert len(ins_rows) == len(ins_want)
+    for rel, (want_rc, step_key, error) in ins_want.items():
+        row = ins_rows[rel]
+        assert row["exit_code"] == want_rc, "%s: exit %d, expected %d" % (rel, row["exit_code"], want_rc)
+        if step_key is None:
+            continue
+        states = {s["key"]: s["state"] for s in row["steps"]}
+        assert states.get(step_key) == "bad", "%s: step %s is %r, expected bad" % (rel, step_key, states.get(step_key))
+        R = V.verify_v5(json.load(open(os.path.join(HERE, rel), encoding="utf-8")), now=FIXTURE_NOW)
+        said = [s for s in R.steps if s["key"] == step_key and error in (s["title"] + s["detail"])]
+        assert said, "%s: step %s does not name %r - the fixture may be failing for the WRONG reason" % (rel, step_key, error)
+    assert [r["axes"].get("publication") for r in v5_expected if r["file"] == "v5/ins-valid-single.json"] == ["committed"]
+    assert all("publication" not in r["axes"] for r in v5_expected if not r["file"].startswith("v5/ins-")), \
+        "the publication axis must appear ONLY for a bundle that claims ③ (the v5 oracle rows are frozen)"
+
     w(os.path.join(HERE, "v5-expected.json"), jdump({
         "_comment": "Oracle produced by verify.py (fixtures/generate.py) for bundle v5 (schema §12). Rows: file (+now) → "
                     "grade, exit_code, axes, per-step state. fixtures/v5-grade-check.mjs must reproduce every row from index.html's runV5; "
@@ -1425,6 +1703,7 @@ echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"
     print("      leaf_input(pubkey)=%s aux=%s" % (d_pk["leaf_input"].hex(), d_pk["aux"].hex()))
     print("      oracle rows: %d (fixtures/v4-expected.json); KAT file is the engine copy, not regenerated" % len(expected))
     print("  v2 party sections: %d KAT checks green (cosign/wallet/multisig/policy/negatives)" % n_v2)
+    print("  ③ inscription: %d KAT checks green (envelope/witness/anchor/batch/bundle + 29 negatives)" % n_ins)
     print("  v5: leaf_input(multisig)=%s s=%d B" % (d_ms["leaf_input"].hex(), len(d_ms["s"])))
     print("      oracle rows: %d (fixtures/v5-expected.json)" % len(v5_expected))
 
