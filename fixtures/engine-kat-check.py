@@ -43,7 +43,11 @@ DEFAULT_ENGINE = os.path.join(HERE, "..", "..", "ann-core", "crates", "bc30-leaf
 # The new sections are exercised by verify.py --selftest (kat_v2_party_checks),
 # fixtures/generate.py and fixtures/multisig/kat.mjs; this script keeps re-deriving
 # the original per-field surface.
-CANONICAL_SHA256 = "ec36c41f344d812e421e563c9cd5fa2eab6b37bb5cbcee4f53965c28899ea112"
+# 2026-09-02 re-cut: the inscription tier's T0 freeze added an `inscription`
+# section. A key-by-key diff of the old and new files is `added: [inscription],
+# removed: [], changed: []` - every byte the four implementations already pin is
+# untouched, which is what the 144 re-derivation rows below actually prove.
+CANONICAL_SHA256 = "dd5c97d8a3df012ebefbb9c23561adebc74dab07499a581c8752367c5df86cbc"
 
 rows = []
 def cmp(field, ours, theirs, note=""):
