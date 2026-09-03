@@ -1,0 +1,5382 @@
+{
+  "_comment": "Oracle produced by verify.py (fixtures/generate.py) for bundle v5 (schema \u00a712). Rows: file (+now) \u2192 grade, exit_code, axes, per-step state. fixtures/v5-grade-check.mjs must reproduce every row from index.html's runV5; fixtures/v5-rc-matrix.py re-runs the CLI and asserts exit codes.",
+  "rows": [
+    {
+      "file": "v5/valid-multisig.json",
+      "now": 1782000700,
+      "grade": "valid",
+      "exit_code": 0,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "ok"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/valid-highs-es256.json",
+      "now": 1782000700,
+      "grade": "valid",
+      "exit_code": 0,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/valid-wallet-single.json",
+      "now": 1782000700,
+      "grade": "valid",
+      "exit_code": 0,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 identifier \u00b7 not checked",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "skip"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/valid-single-openpolicy.json",
+      "now": 1782000700,
+      "grade": "valid",
+      "exit_code": 0,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/warn-consent-mismatch.json",
+      "now": 1782000700,
+      "grade": "warning",
+      "exit_code": 2,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "warn"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-role-relabel.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "bad"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "bad"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "bad"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-order-violation.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "bad"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "bad"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "bad"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "ok"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-nested-alg.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-wallet-high-s.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "bad"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "ok"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-policy-grammar.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "bad"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "ok"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-issuer-no-tlproof.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "bad"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "ok"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-tl-entry-only.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-tl-proof-only.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-unknown-field.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/neg-envelope-both.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-valid-single.json",
+      "now": 1782000700,
+      "grade": "undetermined",
+      "exit_code": 3,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "committed"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "ok"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "ok"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "ok"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-valid-multisig.json",
+      "now": 1782000700,
+      "grade": "undetermined",
+      "exit_code": 3,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "committed"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "reassembly",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "key_binding",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "signer_sigs",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 17,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 18,
+          "key": "subject_binding",
+          "state": "ok"
+        },
+        {
+          "num": 19,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 20,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 21,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 22,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 23,
+          "key": "ins_envelope",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_binding",
+          "state": "ok"
+        },
+        {
+          "num": 25,
+          "key": "ins_commit",
+          "state": "ok"
+        },
+        {
+          "num": 26,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 27,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-undet-no-reveal-tx.json",
+      "now": 1782000700,
+      "grade": "undetermined",
+      "exit_code": 3,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "committed"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "undet"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "undet"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "undet"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "undet"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-two-envelopes-concatenated.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-nested-if.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-op-else-hidden-push.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-truncated-push.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-non-canonical-chunking.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-trailing-after-endif.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-empty-body.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-non-minimal-push.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-unterminated.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-not-an-envelope-no-checksig.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-envelope-not-an-envelope-bare-key.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-binding-protocol-tag-tampered.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "ok"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-binding-content-type-tampered.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "ok"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-binding-record-mismatch.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "ok"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-binding-signature-mismatch.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "ok"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-witness-annex-present.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-witness-stack-too-short.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-witness-malformed-control-block.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-witness-wrong-item-index.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-witness-index-is-control-block.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-anchor-bit0-without-inscription.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "bad"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "bad"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "bad"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-anchor-inscription-without-bit0.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "bad"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-anchor-envelope-root-without-bit0.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "bad"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-anchor-legacy-unified-flags.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "bad"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "bad"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-batch-multi-leaf.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "ok"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "ok"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "ok"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "bad"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-bundle-v4-with-inscription.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-bundle-inscription-unknown-field.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-bundle-anchor-unknown-field.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-bundle-signer-unknown-field.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-invalid-script-key.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "issuer-claim \u00b7 pubkey",
+        "presenter": "not available",
+        "publication": "refused"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "ok"
+        },
+        {
+          "num": 1,
+          "key": "payload",
+          "state": "ok"
+        },
+        {
+          "num": 2,
+          "key": "policy",
+          "state": "ok"
+        },
+        {
+          "num": 3,
+          "key": "subject",
+          "state": "ok"
+        },
+        {
+          "num": 4,
+          "key": "record",
+          "state": "ok"
+        },
+        {
+          "num": 5,
+          "key": "issuer_sig",
+          "state": "ok"
+        },
+        {
+          "num": 6,
+          "key": "leaf",
+          "state": "ok"
+        },
+        {
+          "num": 7,
+          "key": "merkle",
+          "state": "ok"
+        },
+        {
+          "num": 8,
+          "key": "root",
+          "state": "ok"
+        },
+        {
+          "num": 9,
+          "key": "trust_list",
+          "state": "ok"
+        },
+        {
+          "num": 10,
+          "key": "envelope",
+          "state": "ok"
+        },
+        {
+          "num": 11,
+          "key": "aux",
+          "state": "ok"
+        },
+        {
+          "num": 12,
+          "key": "key_validity",
+          "state": "ok"
+        },
+        {
+          "num": 13,
+          "key": "txid",
+          "state": "ok"
+        },
+        {
+          "num": 14,
+          "key": "expiry",
+          "state": "ok"
+        },
+        {
+          "num": 15,
+          "key": "revocation",
+          "state": "ok"
+        },
+        {
+          "num": 16,
+          "key": "presentation",
+          "state": "skip"
+        },
+        {
+          "num": 17,
+          "key": "chain",
+          "state": "skip"
+        },
+        {
+          "num": 18,
+          "key": "onchain",
+          "state": "skip"
+        },
+        {
+          "num": 19,
+          "key": "ins_anchor",
+          "state": "ok"
+        },
+        {
+          "num": 20,
+          "key": "ins_envelope",
+          "state": "bad"
+        },
+        {
+          "num": 21,
+          "key": "ins_binding",
+          "state": "bad"
+        },
+        {
+          "num": 22,
+          "key": "ins_commit",
+          "state": "bad"
+        },
+        {
+          "num": 23,
+          "key": "ins_batch",
+          "state": "ok"
+        },
+        {
+          "num": 24,
+          "key": "ins_publication",
+          "state": "undet"
+        }
+      ]
+    },
+    {
+      "file": "v5/ins-neg-anchor-unknown-key.json",
+      "now": 1782000700,
+      "grade": "rejected",
+      "exit_code": 1,
+      "axes": {
+        "attribution": "none",
+        "presenter": "not checked"
+      },
+      "steps": [
+        {
+          "num": 0,
+          "key": "schema",
+          "state": "bad"
+        }
+      ]
+    }
+  ]
+}

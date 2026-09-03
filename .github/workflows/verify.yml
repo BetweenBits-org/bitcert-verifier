@@ -69,6 +69,29 @@ jobs:
       - name: v4 - index.html runV4 reproduces the Python oracle (grade · axes · every step)
         run: node fixtures/v4-grade-check.mjs
 
+      # ---- bundle v5 (role-labelled multi-signature issuance, schema §12) ----
+      # Same oracle discipline as v4: fixtures/v5-expected.json is written by
+      # verify.py; the CLI matrix asserts exit codes 0/1/2 per fixture and the
+      # shipped browser runV5 must reproduce every grade, axis and step. The
+      # 0x10 primitives themselves are pinned by the multisig node KAT.
+      - name: v5 - zk-core.js 0x10 / wallet / policy primitives match the engine KAT (27 negatives included)
+        run: node fixtures/multisig/kat.mjs
+
+      # ---- ③ inscription tier (frozen spec 2026-09-02, MUST 14-26) ----------
+      # The verifier ships BEFORE the issuing path: an older verifier marks a ③
+      # bundle REJECTED, indistinguishable from a forgery, so something able to
+      # read the first ③ bundle has to exist first. The engine KAT's 29 negatives
+      # are pinned by their ERROR IDENTIFIER in both implementations, and every
+      # one of them is also a complete v5 file in fixtures/v5/ins-neg-*.json.
+      - name: ③ - zk-core.js matches the engine KAT's inscription section (29 negatives included)
+        run: node fixtures/inscription/kat.mjs
+
+      - name: v5 - CLI exit-code matrix (0 valid / 1 rejected / 2 warning / 3 undetermined - ③ included)
+        run: python3 fixtures/v5-rc-matrix.py
+
+      - name: v5 - index.html runV5 reproduces the Python oracle (grade · axes · every step)
+        run: node fixtures/v5-grade-check.mjs
+
       # ---- zk (bundle §8) -------------------------------------------------
       # Three implementations of one frozen contract: the Go engine, zk-core.js
       # and index.html's inlined copy. Nothing but these gates stops them

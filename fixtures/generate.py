@@ -187,6 +187,62 @@ assert _rfc6979_k(_rfc_x, V.sha256(b"test")) == int(_RFC["test"]["k"], 16), "RFC
 assert V.der_to_rs(ecdsa_sign_der(_rfc_x, b"sample")) == (int(_RFC["sample"]["r"], 16), int(_RFC["sample"]["s"], 16)), "RFC 6979 r/s drift"
 assert p256_pub33(_rfc_x) == V.p256_compress((int(_RFC["Ux"], 16), int(_RFC["Uy"], 16))), "RFC 6979 pubkey drift"
 
+# ---------------- secp256k1 signing (RFC 6979, wallet issuer alg 0x04) ----------------
+def _rfc6979_k1(x, h1):
+    """RFC 6979 §3.2 with HMAC-SHA256, q = n (secp256k1). h1 is the 32-byte
+    digest being signed - the wallet message scheme double-hashes by itself and
+    ECDSA verifies that digest DIRECTLY (schema §12.3)."""
+    q = V._SECP256K1_N
+    bx = _int2octets(x) + _int2octets(_bits2int(h1) % q)
+    Vv, K = b"\x01" * 32, b"\x00" * 32
+    K = hmac.new(K, Vv + b"\x00" + bx, hashlib.sha256).digest()
+    Vv = hmac.new(K, Vv, hashlib.sha256).digest()
+    K = hmac.new(K, Vv + b"\x01" + bx, hashlib.sha256).digest()
+    Vv = hmac.new(K, Vv, hashlib.sha256).digest()
+    while True:
+        T = b""
+        while len(T) < 32:
+            Vv = hmac.new(K, Vv, hashlib.sha256).digest()
+            T += Vv
+        k = _bits2int(T)
+        if 1 <= k <= q - 1:
+            return k
+        K = hmac.new(K, Vv + b"\x00", hashlib.sha256).digest()
+        Vv = hmac.new(K, Vv, hashlib.sha256).digest()
+
+def secp256k1_sign_digest(priv, digest32):
+    """Deterministic ECDSA over a precomputed digest. Returns (r, s, recovery_id)
+    with s normalised LOW (producing low-s is the producer's job - §12.3) and
+    the recovery id adjusted to match the normalised s."""
+    n = V._SECP256K1_N
+    e = _bits2int(digest32) % n
+    while True:
+        k = _rfc6979_k1(priv, digest32)
+        Rp = V._k1_mul(V._SECP256K1_G, k)
+        r = Rp[0] % n
+        s = pow(k, -1, n) * (e + r * priv) % n
+        if r and s:
+            rec = (Rp[1] & 1) | (2 if Rp[0] >= n else 0)
+            if s > n // 2:
+                s = n - s
+                rec ^= 1
+            return r, s, rec
+        digest32 = V.sha256(digest32)   # unreachable in practice; keeps the loop total
+
+def k1_pub33(priv):
+    return V.secp256k1_compress(V._k1_mul(V._SECP256K1_G, priv))
+
+def wallet_sign_rs(priv, digest32):
+    """64-byte r ‖ s for the 0x04 issuer signature (no header, low-s)."""
+    r, s, _rec = secp256k1_sign_digest(priv, digest32)
+    return _int2octets(r) + _int2octets(s)
+
+def wallet_sign_recoverable(priv, digest32):
+    """65-byte header ‖ r ‖ s for key registration; header = 31 + recovery id
+    (the compressed-key convention inside the accepted 27..=34 range)."""
+    r, s, rec = secp256k1_sign_digest(priv, digest32)
+    return bytes([31 + rec]) + _int2octets(r) + _int2octets(s)
+
 # ---------------- test keys (fixed seeds - TEST ONLY, never production) ----------------
 def _seed_priv(label):
     d = int.from_bytes(V.sha256(label.encode("utf-8")), "big") % V._P256_N
@@ -212,6 +268,31 @@ POLICY = {"document_type": "audit", "jurisdiction": "GENERIC"}
 V4_DOC = b"%PDF-1.4\n1 0 obj<<>>endobj\nBC30 LEAF V2 KAT\n%%EOF\n"
 V4_BATCH_ID = bytes.fromhex("0192a3b4c5d6e7f80192a3b4c5d6e7fa")
 IDENTIFIER = "alice@example.com"
+
+# ---- v5 keys + policy (schema §12) ----
+def _seed_priv_k1(label):
+    d = int.from_bytes(V.sha256(label.encode("utf-8")), "big") % V._SECP256K1_N
+    assert 1 <= d < V._SECP256K1_N
+    return d
+
+WALLET_PRIV = _seed_priv_k1("bitcert-verifier:test:wallet:v1")   # the engine KAT's wallet key
+WALLET_PUB = k1_pub33(WALLET_PRIV)
+CONSENT_OTHER_PRIV = _seed_priv("bitcert-verifier:test:consent-other:v1")
+CONSENT_OTHER_PUB = p256_pub33(CONSENT_OTHER_PRIV)
+V5_BATCH_ID = bytes.fromhex("0192a3b4c5d6e7f80192a3b4c5d6e7fb")
+POLICY_OPEN = {"document_type": "audit", "jurisdiction": "GENERIC",
+               "content_author_type": "display_name", "x_department": "treasury ops"}
+
+# Pin the secp256k1 signer against the engine KAT (Rust secp256k1 crate, RFC
+# 6979): a drift would silently re-sign every v5 fixture with different bytes.
+with open(os.path.join(HERE, "bc30-v2-vectors.json"), "r", encoding="utf-8") as _f:
+    KAT = json.load(_f)
+_wk = KAT["wallet"]
+assert WALLET_PUB.hex() == _wk["public_key"], "wallet seed/pubkey drift vs engine KAT"
+assert wallet_sign_rs(WALLET_PRIV, bytes.fromhex(_wk["issuance_digest"])).hex() == _wk["signature_rs"], \
+    "secp256k1 RFC 6979 signer drift vs engine KAT"
+assert wallet_sign_recoverable(WALLET_PRIV, bytes.fromhex(_wk["registration_digest"])).hex() == _wk["registration_sig65"], \
+    "recoverable signer drift vs engine KAT"
 
 # ---------------- WebAuthn synthetic assertion ----------------
 def build_assertion(priv, rp_id, origin, challenge, uv=True, sign_count=1):
@@ -304,9 +385,9 @@ def build_status_list(revoked=SL_REVOKED):
     return smt
 
 # ---------------- trust list ----------------
-def tl_entry(issuer_id, pub33, valid_from=KEY_VALID_FROM, valid_to=0, revoked_at=0):
-    kid = V.key_id(V.CURVE_P256, pub33)
-    return {"issuer_id": issuer_id.hex(), "key_id": kid.hex(), "curve_id": V.CURVE_P256,
+def tl_entry(issuer_id, pub33, valid_from=KEY_VALID_FROM, valid_to=0, revoked_at=0, curve_id=V.CURVE_P256):
+    kid = V.key_id(curve_id, pub33)
+    return {"issuer_id": issuer_id.hex(), "key_id": kid.hex(), "curve_id": curve_id,
             "public_key": pub33.hex(), "valid_from": valid_from, "valid_to": valid_to, "revoked_at": revoked_at}
 
 def tl_entry_bytes_of(e):
@@ -323,11 +404,24 @@ def build_trust_list(entries, want_key_id):
 
 DEFAULT_TL_ENTRIES = lambda issuer_entry: [issuer_entry, tl_entry(ISSUER2_ID, ISSUER2_PUB), tl_entry(ISSUER3_ID, ISSUER3_PUB, revoked_at=1781700000)]
 
+def build_trust_list_proofs(entries, want_key_ids):
+    """One platform-global tree (schema §12.6 MUST 7), a proof per wanted key."""
+    entries = sorted(entries, key=lambda e: e["key_id"])
+    leaves = [V.tl_leaf(tl_entry_bytes_of(e)) for e in entries]
+    kids = [e["key_id"] for e in entries]
+    root, proofs = None, {}
+    for kid in want_key_ids:
+        idx = kids.index(kid)
+        root, proof = merkle_root_and_proof(leaves, idx)
+        proofs[kid] = {"leaf_index": idx, "siblings": proof["siblings"], "directions": proof["directions"]}
+    return root, proofs, entries
+
 # ---------------- v4 bundle assembler ----------------
 def assemble_v4_bundle(name, subject="none", alg="es256-plain", rp_id=V.BC30_RP_ID, origin=V.BC30_ORIGINS[0],
                        uv=True, issued_at=ISSUED_AT, expires_at=0, block_time=BLOCK_TIME, doc=V4_DOC,
                        identifier=IDENTIFIER, payload_version=V.OP_RETURN_V31_VERSION, aux_override=None,
-                       issuer_entry=None, content_type="application/pdf"):
+                       issuer_entry=None, content_type="application/pdf",
+                       schema="bitcert-proof-bundle/v4", policy=None, batch_id=None, wallet_high_s=False):
     """A complete, internally consistent v4 issuance bundle. Every derived value is
     produced by verify.py's own builders, so nothing here can drift from the
     verifier; the knobs exist only so the negative fixtures can be built
@@ -342,7 +436,8 @@ def assemble_v4_bundle(name, subject="none", alg="es256-plain", rp_id=V.BC30_RP_
         st, ref = V.SUBJECT_PUBKEY, V.subject_ref_pubkey(V.CURVE_P256, SUBJECT_PUB)
     else:
         raise ValueError(subject)
-    ph = V.policy_hash(POLICY)
+    pol = POLICY if policy is None else policy
+    ph = V.policy_hash(pol)
     args = (salt, doc_sha, st, ref, issued_at, expires_at, ph)
     R, m = V.record_bytes(*args), V.issue_message(*args)
     if alg == "webauthn-es256":
@@ -353,6 +448,14 @@ def assemble_v4_bundle(name, subject="none", alg="es256-plain", rp_id=V.BC30_RP_
         sig = ecdsa_sign_der(ISSUER_PRIV, m)
         s = V.issuer_sig_bytes(V.ALG_ES256_PLAIN, sig)
         assertion = {"signature_der": sig.hex()}
+    elif alg == "wallet-secp256k1":
+        digest = V.bitcoin_message_digest(V.wallet_issuance_message(m))
+        rs = wallet_sign_rs(WALLET_PRIV, digest)
+        if wallet_high_s:
+            s_int = V._SECP256K1_N - int.from_bytes(rs[32:], "big")
+            rs = rs[:32] + s_int.to_bytes(32, "big")
+        s = b"\x04" + rs
+        assertion = {"signature_rs": rs.hex()}
     else:
         raise ValueError(alg)
     li = V.leaf_input_v2(V.LEAF_TYPE_ISSUANCE, R, s)
@@ -364,7 +467,7 @@ def assemble_v4_bundle(name, subject="none", alg="es256-plain", rp_id=V.BC30_RP_
     sl_root, sl_proof = smt.root(), smt.prove(li)
     env = V.envelope_root_none()
     aux = V.aux_commitment(tl_root, sl_root, env)
-    payload = V.bc30_v31(root, V4_BATCH_ID, aux_override or aux)
+    payload = V.bc30_v31(root, batch_id or V4_BATCH_ID, aux_override or aux)
     if payload_version != V.OP_RETURN_V31_VERSION:
         payload = payload[:4] + bytes([payload_version]) + payload[5:]
     raw_tx = build_reveal_tx(payload)
@@ -373,7 +476,7 @@ def assemble_v4_bundle(name, subject="none", alg="es256-plain", rp_id=V.BC30_RP_
     if block_time is not None:
         confirmed["block_time"] = block_time
     bundle = {
-        "schema": "bitcert-proof-bundle/v4",
+        "schema": schema,
         "bitcoin_network": "regtest",
         "generated_at": "2026-06-21T00:10:00Z",
         "record": {
@@ -384,7 +487,7 @@ def assemble_v4_bundle(name, subject="none", alg="es256-plain", rp_id=V.BC30_RP_
                 "record_salt": salt.hex(), "doc_sha256": doc_sha.hex(),
                 "subject_type": st, "subject_ref": ref.hex(),
                 "issued_at": issued_at, "expires_at": expires_at,
-                "policy": dict(POLICY), "policy_hash": ph.hex(),
+                "policy": dict(pol), "policy_hash": ph.hex(),
             },
             "descriptor": {"exchange_id": "demoex", "attestation_id": "att-" + name},
         },
@@ -413,6 +516,336 @@ def assemble_v4_bundle(name, subject="none", alg="es256-plain", rp_id=V.BC30_RP_
     return bundle, {"leaf_input": li, "m": m, "R": R, "s": s, "salt": salt, "doc_sha": doc_sha, "aux": aux,
                     "tl_root": tl_root, "sl_root": sl_root}
 
+# ---------------- v5 multi-signature bundle assembler (schema §12.4-§12.5) ----------------
+def assemble_v5_bundle(name, signer_specs, subject="pubkey", subject_pub=None, policy=None,
+                       issued_at=ISSUED_AT, expires_at=0, block_time=BLOCK_TIME, doc=V4_DOC,
+                       identifier=IDENTIFIER, content_type="application/pdf"):
+    """A complete, internally consistent signers[] bundle. Signer specs:
+    {role, alg, priv, listed: issuer_id|None, high_s?, rp_id?, origin?, uv?,
+    sign_count?}. Entries are emitted in the canonical strictly-ascending
+    (role_ord, key_id) order - the PRODUCER sorts, the verifier only refuses
+    (§12.5); every derived value comes from verify.py's own builders."""
+    pol = POLICY_OPEN if policy is None else policy
+    doc_sha = V.sha256(doc)
+    salt = V.sha256(("bitcert-verifier:test:salt:" + name).encode())[:16]
+    subject_pub = SUBJECT_PUB if subject_pub is None else subject_pub
+    if subject == "none":
+        st, ref = V.SUBJECT_NONE, V.subject_ref_none()
+    elif subject == "idhash":
+        st, ref = V.SUBJECT_ID_HASH, V.subject_ref_id_hash(salt, identifier)
+    elif subject == "pubkey":
+        st, ref = V.SUBJECT_PUBKEY, V.subject_ref_pubkey(V.CURVE_P256, subject_pub)
+    else:
+        raise ValueError(subject)
+    ph = V.policy_hash(pol)
+    args = (salt, doc_sha, st, ref, issued_at, expires_at, ph)
+    R, m = V.record_bytes(*args), V.issue_message(*args)
+
+    built = []
+    for spec in signer_specs:
+        role, alg, priv = spec["role"], spec["alg"], spec["priv"]
+        m_i = V.cosign_message(m, role)
+        entry = {"role": role, "alg": alg}
+        if alg == "webauthn-es256":
+            ad, cdj, sig = build_assertion(priv, spec.get("rp_id", V.BC30_RP_ID), spec.get("origin", V.BC30_ORIGINS[0]),
+                                           m_i, uv=spec.get("uv", True), sign_count=spec.get("sign_count", 9))
+            inner = V.issuer_sig_bytes(V.ALG_WEBAUTHN_ES256, sig, ad, cdj)
+            pub, curve = p256_pub33(priv), V.CURVE_P256
+            entry["rp_id"] = spec.get("rp_id", V.BC30_RP_ID)
+            entry["assertion"] = {"authenticator_data": ad.hex(), "client_data_json": cdj.hex(), "signature_der": sig.hex()}
+        elif alg == "es256-plain":
+            sig = ecdsa_sign_der(priv, m_i)
+            if spec.get("high_s"):
+                r_i, s_i = V.der_to_rs(sig)
+                sig = V.rs_to_der(r_i, V._P256_N - s_i)   # the malleated twin MUST stay valid (§12.2)
+            inner = V.issuer_sig_bytes(V.ALG_ES256_PLAIN, sig)
+            pub, curve = p256_pub33(priv), V.CURVE_P256
+            entry["assertion"] = {"signature_der": sig.hex()}
+        elif alg == "wallet-secp256k1":
+            digest = V.bitcoin_message_digest(V.wallet_cosign_message(m_i))
+            rs = wallet_sign_rs(priv, digest)
+            if spec.get("high_s"):
+                s_int = V._SECP256K1_N - int.from_bytes(rs[32:], "big")
+                rs = rs[:32] + s_int.to_bytes(32, "big")  # low-s IS enforced for 0x04 - must refuse
+            inner = b"\x04" + rs
+            pub, curve = k1_pub33(priv), V.CURVE_SECP256K1
+            entry["assertion"] = {"signature_rs": rs.hex()}
+        else:
+            raise ValueError(alg)
+        kid = V.key_id(curve, pub)
+        entry.update(curve_id=curve, public_key=pub.hex(), key_id=kid.hex())
+        if spec.get("listed") is not None:
+            entry["_tl"] = tl_entry(spec["listed"], pub, curve_id=curve)
+        built.append((V.ROLE_ORD[role], kid, inner, entry))
+    built.sort(key=lambda t: (t[0], t[1]))
+    s = V.assemble_multisig_s([(e["role"], kid, inner) for _o, kid, inner, e in built])
+
+    li = V.leaf_input_v2(V.LEAF_TYPE_ISSUANCE, R, s)
+    others = [V.sha256(b"other-leaf-" + bytes([b])) for b in (1, 2, 3)]
+    root, proof = merkle_root_and_proof([li] + others, 0)
+    listed = [e["_tl"] for _o, _k, _i, e in built if "_tl" in e]
+    entries = list(listed)
+    seen_kids = {e["key_id"] for e in listed}
+    for extra in (tl_entry(ISSUER2_ID, ISSUER2_PUB), tl_entry(ISSUER3_ID, ISSUER3_PUB, revoked_at=1781700000)):
+        if extra["key_id"] not in seen_kids:
+            entries.append(extra)
+    tl_root, tl_proofs, _sorted = build_trust_list_proofs(entries, [e["key_id"] for e in listed])
+    if tl_root is None:                                   # no listed signer at all (negative fixtures)
+        tl_root, _p, _e = build_trust_list(entries, entries[0]["key_id"])
+    smt = build_status_list()
+    sl_root, sl_proof = smt.root(), smt.prove(li)
+    env = V.envelope_root_none()
+    aux = V.aux_commitment(tl_root, sl_root, env)
+    payload = V.bc30_v31(root, V5_BATCH_ID, aux)
+    raw_tx = build_reveal_tx(payload)
+    txid, _ = V.txid_from_raw(raw_tx)
+    confirmed = {"block_height": 142, "block_hash": "00" * 32, "confirmations": 6}
+    if block_time is not None:
+        confirmed["block_time"] = block_time
+    signers_json = []
+    for _o, _k, _i, e in built:
+        tl = e.pop("_tl", None)
+        out = {"role": e["role"], "alg": e["alg"], "curve_id": e["curve_id"],
+               "public_key": e["public_key"], "key_id": e["key_id"]}
+        if "rp_id" in e:
+            out["rp_id"] = e["rp_id"]
+        out["assertion"] = e["assertion"]
+        if tl is not None:
+            out["tl_entry"] = tl
+            out["tl_proof"] = tl_proofs[tl["key_id"]]
+        signers_json.append(out)
+    bundle = {
+        "schema": "bitcert-proof-bundle/v5",
+        "bitcoin_network": "regtest",
+        "generated_at": "2026-06-21T00:10:00Z",
+        "record": {
+            "kind": "issuance",
+            "leaf_bytes": li.hex(),
+            "preimage": {
+                "scheme": "bc30-leaf-v2", "leaf_type": V.LEAF_TYPE_ISSUANCE,
+                "record_salt": salt.hex(), "doc_sha256": doc_sha.hex(),
+                "subject_type": st, "subject_ref": ref.hex(),
+                "issued_at": issued_at, "expires_at": expires_at,
+                "policy": dict(pol), "policy_hash": ph.hex(),
+            },
+            "descriptor": {"exchange_id": "demoex", "attestation_id": "att-" + name},
+        },
+        "merkle": proof,
+        "anchor": {
+            "reveal_txid": txid, "commit_txid": "00" * 32,
+            "reveal_tx_hex": raw_tx, "op_return_payload_hex": payload.hex(),
+            "confirmed": confirmed,
+        },
+        "signers": signers_json,
+        "aux": {
+            "scheme": "bc30-aux-v2",
+            "tl_root": tl_root.hex(), "sl_root": sl_root.hex(), "envelope_root": env.hex(),
+            "sl_proof": sl_proof,
+        },
+    }
+    if content_type is not None:
+        bundle["record"]["preimage"]["content_type"] = content_type
+    if st == V.SUBJECT_PUBKEY:
+        bundle["subject"] = {"curve_id": V.CURVE_P256, "public_key": subject_pub.hex()}
+    return bundle, {"leaf_input": li, "m": m, "R": R, "s": s, "salt": salt, "aux": aux, "tl_root": tl_root}
+
+# ---------------- ③ inscription tier (docs/inscription-tier-spec-2026-09-02.md) ----------------
+# The ③ fixtures are built from the ENGINE KAT's own bytes, not from this file's
+# test keys: the record, the issuer assertion, the trust/status lists, the
+# envelope scripts, the anchor and the real commit+reveal pair all come from
+# fixtures/bc30-v2-vectors.json. That makes fixtures/v5/ins-*.json the complete
+# v5 files the frozen spec 9.1 asks for - the engine KAT keeps only the ③ slice.
+INS = KAT["inscription"]
+INS_ISSUER_TL = [e for e in KAT["tl_entries_three"] if e["key_id"] == KAT["tl_key_id"]][0]
+INS_BLOCK_TIME = BLOCK_TIME                      # inside the KAT key's validity window
+
+def tx_parts(hex_str):
+    """Full (de)serialisation of a raw transaction - parse_tx() in verify.py
+    deliberately drops the witness, and the ③ fixtures need to re-emit it."""
+    r = V._R(bytes.fromhex(hex_str))
+    version = r.take(4)
+    segwit = r.b[r.o:r.o + 2] == b"\x00\x01"
+    if segwit:
+        r.take(2)
+    vin = r.varint()
+    inputs = []
+    for _ in range(vin):
+        prev = r.take(36)
+        script = r.take(r.varint())
+        inputs.append({"prev": prev, "script": script, "seq": r.take(4)})
+    outputs = []
+    for _ in range(r.varint()):
+        value = r.take(8)
+        outputs.append({"value": value, "script": r.take(r.varint())})
+    witnesses = []
+    if segwit:
+        for _ in range(vin):
+            witnesses.append([r.take(r.varint()) for _ in range(r.varint())])
+    return {"version": version, "inputs": inputs, "outputs": outputs,
+            "witnesses": witnesses, "locktime": r.take(4)}
+
+def tx_hex(tx):
+    p = [tx["version"]]
+    if tx["witnesses"]:
+        p.append(b"\x00\x01")
+    p.append(V._enc_varint(len(tx["inputs"])))
+    for i in tx["inputs"]:
+        p += [i["prev"], V._enc_varint(len(i["script"])), i["script"], i["seq"]]
+    p.append(V._enc_varint(len(tx["outputs"])))
+    for o in tx["outputs"]:
+        p += [o["value"], V._enc_varint(len(o["script"])), o["script"]]
+    for w in tx["witnesses"]:
+        p.append(V._enc_varint(len(w)))
+        for item in w:
+            p += [V._enc_varint(len(item)), item]
+    p.append(tx["locktime"])
+    return b"".join(p).hex()
+
+def anchor_output_script(payload):
+    return b"\x6a\x4c" + bytes([len(payload)]) + payload
+
+def respin_reveal(raw_hex, witness=None, payload=None, input_index=0):
+    """Return a reveal transaction with a different witness and/or 86-byte
+    payload. Swapping the WITNESS leaves the txid untouched (that is the whole
+    point of the tier 3 threat model); changing the payload does not, so the
+    caller re-reads the txid from the result."""
+    tx = tx_parts(raw_hex)
+    if witness is not None:
+        tx["witnesses"][input_index] = [bytes(x) for x in witness]
+    if payload is not None:
+        tx["outputs"][0]["script"] = anchor_output_script(payload)
+    return tx_hex(tx)
+
+def assemble_inscription_bundle(envelope="single", flags=0b11, envelope_root=None,
+                                with_inscription=True, witness=None, witness_item_index=None,
+                                merkle=None, schema="bitcert-proof-bundle/v5", drop_reveal_tx=False):
+    """A complete ③ bundle over the engine KAT's record. `envelope` picks which
+    of the two frozen envelopes is revealed: "single" (s_webauthn, one chunk) or
+    "multisig" (multisig.s, chunks [520, 335] - the 520-byte rule in force).
+
+    Everything the verifier recomputes stays internally consistent, so a fixture
+    trips exactly the gate it is named after: the payload is rebuilt from the
+    flags / envelope_root / merkle root actually given here."""
+    h = bytes.fromhex
+    env = INS["envelopes"][envelope]
+    multi = envelope == "multisig"
+    leaf_input = h(env["leaf_input"])
+    env_root = h(env["envelope_root"]) if envelope_root is None else h(envelope_root)
+
+    # trust list: the KAT's single-entry list (the root the engine folds into aux)
+    tl = {"issuer_id": INS_ISSUER_TL["issuer_id"], "key_id": INS_ISSUER_TL["key_id"],
+          "curve_id": INS_ISSUER_TL["curve_id"], "public_key": INS_ISSUER_TL["public_key"],
+          "valid_from": INS_ISSUER_TL["valid_from"], "valid_to": INS_ISSUER_TL["valid_to"],
+          "revoked_at": INS_ISSUER_TL["revoked_at"]}
+    tl_root = V.leaf_hash(V.tl_leaf(tl_entry_bytes_of(tl)))
+    assert tl_root.hex() == KAT["tl_root_single"]
+
+    # status list: the KAT's revoked set, with an exclusion proof for THIS leaf
+    smt = SMT()
+    for r in KAT["sl_revoked"]:
+        smt.insert(h(r["key"]), h(r["value"]))
+    assert smt.root().hex() == KAT["sl_root"]
+    sl_proof = smt.prove(leaf_input)
+
+    aux_commit = V.aux_commitment(tl_root, h(KAT["sl_root"]), env_root)
+    root, single = single_leaf_merkle(leaf_input)
+    merkle_section = single if merkle is None else dict(merkle)
+    payload = V.bc30_v31(h(merkle_section["root"]), h(KAT["op_return_batch_id"]), aux_commit, flags=flags)
+
+    # The reveal transaction: the KAT's own commit+reveal pair for the single
+    # envelope (a real BIP-340 signature made without auxiliary randomness), and
+    # the same shape re-spun for anything this fixture changes.
+    wit = witness
+    if wit is None:
+        wit = ([h(x) for x in INS["reveal"]["witness"]] if not multi
+               else [bytes(64), h(env["script"]), h(env["control_block"])])
+    same_payload = payload.hex() == INS["anchor"]["op_return_v31"]
+    raw = respin_reveal(INS["reveal"]["reveal_tx_hex"], witness=wit,
+                        payload=None if same_payload else payload)
+    txid, got_payload = V.txid_from_raw(raw)
+    assert got_payload == payload.hex()
+
+    signers = None
+    issuer = None
+    if multi:
+        signers = []
+        for e in KAT["multisig"]["entries"]:
+            alg = {1: "webauthn-es256", 2: "es256-plain", 4: "wallet-secp256k1"}[e["inner_alg"]]
+            entry = {"role": e["role"], "alg": alg, "curve_id": e["curve_id"],
+                     "public_key": e["public_key"], "key_id": e["key_id"]}
+            if alg == "webauthn-es256":
+                entry["rp_id"] = KAT["rp_id"]
+                entry["assertion"] = {"authenticator_data": e["authenticator_data"],
+                                      "client_data_json": e["client_data_json"],
+                                      "signature_der": e["signature_der"]}
+            else:
+                entry["assertion"] = {"signature_rs": e["signature_rs"]}
+            if e["key_id"] == KAT["tl_key_id"]:
+                entry["tl_entry"] = dict(tl)
+                entry["tl_proof"] = {"leaf_index": 0, "siblings": [], "directions": []}
+            signers.append(entry)
+        assert V.assemble_multisig_s([(e["role"], h(e["key_id"]), h(e["inner_sig"]))
+                                      for e in KAT["multisig"]["entries"]]).hex() == KAT["multisig"]["s"]
+    else:
+        issuer = {"issuer_id": KAT["tl_issuer_id"], "key_id": KAT["tl_key_id"],
+                  "alg": "webauthn-es256", "rp_id": KAT["rp_id"],
+                  "assertion": {"authenticator_data": KAT["authenticator_data"],
+                                "client_data_json": KAT["client_data_json"],
+                                "signature_der": KAT["signature_der"]}}
+
+    anchor = {"reveal_txid": txid, "commit_txid": INS["reveal"]["commit_txid"],
+              "reveal_tx_hex": raw, "op_return_payload_hex": payload.hex(),
+              "confirmed": {"block_height": 142, "block_hash": "00" * 32,
+                            "confirmations": 6, "block_time": INS_BLOCK_TIME}}
+    if drop_reveal_tx:
+        del anchor["reveal_tx_hex"]
+    bundle = {
+        "schema": schema,
+        "bitcoin_network": "regtest",
+        "generated_at": "2026-06-21T00:10:00Z",
+        "record": {
+            "kind": "issuance",
+            "leaf_bytes": leaf_input.hex(),
+            "preimage": {
+                "scheme": "bc30-leaf-v2", "leaf_type": KAT["leaf_type"],
+                "record_salt": KAT["record_salt"], "doc_sha256": KAT["doc_sha256"],
+                "subject_type": KAT["subject_type"], "subject_ref": KAT["subject_ref_pubkey"],
+                "issued_at": KAT["issued_at"], "expires_at": KAT["expires_at"],
+                "policy": {"document_type": KAT["policy_document_type"],
+                           "jurisdiction": KAT["policy_jurisdiction"]},
+                "policy_hash": KAT["policy_hash"],
+            },
+            "descriptor": {"exchange_id": "demoex", "attestation_id": "att-inscription-" + envelope},
+        },
+        "merkle": merkle_section,
+        "anchor": anchor,
+        "subject": {"curve_id": V.CURVE_P256, "public_key": KAT["subject_pub33"]},
+        "aux": {"scheme": "bc30-aux-v2", "tl_root": tl_root.hex(), "sl_root": KAT["sl_root"],
+                "envelope_root": env_root.hex(), "sl_proof": sl_proof},
+    }
+    if multi:
+        bundle["signers"] = signers
+    else:
+        bundle["issuer"] = issuer
+        bundle["aux"]["tl_entry"] = dict(tl)
+        bundle["aux"]["tl_proof"] = {"leaf_index": 0, "siblings": [], "directions": []}
+    if with_inscription:
+        bundle["inscription"] = {"reveal_txid": txid, "input_index": INS["reveal"]["input_index"],
+                                 "witness_item_index": INS["reveal"]["witness_item_index"]
+                                 if witness_item_index is None else witness_item_index}
+    return bundle
+
+def check_inscription_section():
+    """Gate generation on the ③ section of the engine KAT copy, exactly as
+    check_v2_party_sections() gates the party-model sections: the same
+    kat_inscription_checks() that verify.py --selftest runs."""
+    results = V.kat_inscription_checks(KAT)
+    bad = [label for ok, label in results if not ok]
+    assert not bad, "engine KAT ③ section failed:\n  " + "\n  ".join(bad)
+    assert tx_hex(tx_parts(INS["reveal"]["reveal_tx_hex"])) == INS["reveal"]["reveal_tx_hex"], \
+        "transaction (de)serialiser is not a round trip"
+    return len(results)
+
 # ---------------- presentation (the /present blob a recipient hands the verifier) ----------------
 PRESENT_NONCE = bytes.fromhex("0f1e2d3c4b5a69788796a5b4c3d2e1f0")
 PRESENT_VERIFIER_ID = V.make_verifier_id("ci-fixture", bytes.fromhex("00112233445566778899aabbccddeeff"))
@@ -436,12 +869,36 @@ def build_presentation(leaf_input, nonce=PRESENT_NONCE, verifier_id=PRESENT_VERI
 # that file with verify.py's builders + this file's RFC 6979 signer and fails on any
 # byte difference; verify.py --selftest and the node checks pin the same file.
 
+def check_v2_party_sections():
+    """Gate generation on the party-model v2 sections of the engine KAT copy
+    (cosign / wallet / multisig / policy_open / es256_plain_alternate_s /
+    negative_v2, bundle-schema.md §12). Runs the same kat_v2_party_checks()
+    that verify.py --selftest runs, so the copy being stale or the primitives
+    drifting aborts generation instead of silently shipping fixtures built on a
+    different frozen spec. The v5 bundle fixtures themselves are generated in
+    main() (assemble_v5_bundle + the fixtures/v5-expected.json oracle) - this
+    gate runs FIRST so they are only ever built on a green frozen spec.
+    """
+    with open(os.path.join(HERE, "bc30-v2-vectors.json"), "r", encoding="utf-8") as f:
+        vec = json.load(f)
+    results = V.kat_v2_party_checks(vec)
+    bad = [label for ok, label in results if not ok]
+    assert not bad, "engine KAT v2 party sections failed:\n  " + "\n  ".join(bad)
+    return len(results)
+
 def v4_expect(rel, bundle, **kw):
     """Run verify.py's pipeline on a fixture and record the oracle row."""
     R = V.verify_v4(bundle, now=FIXTURE_NOW, **kw)
     row = {"file": rel, "now": FIXTURE_NOW}
     if kw.get("identifier") is not None: row["identifier"] = kw["identifier"]
     if kw.get("nonce_hex") is not None: row["nonce"] = kw["nonce_hex"]
+    row.update(R.summary())
+    return row
+
+def v5_expect(rel, bundle, **kw):
+    """Run verify.py's v5 dispatch on a fixture and record the oracle row."""
+    R = V.verify_v5(bundle, now=FIXTURE_NOW, **kw)
+    row = {"file": rel, "now": FIXTURE_NOW}
     row.update(R.summary())
     return row
 
@@ -651,6 +1108,10 @@ def jdump(obj):
     return json.dumps(obj, indent=2) + "\n"
 
 def main():
+    # party-model v2 KAT gate (validation only - see check_v2_party_sections)
+    n_v2 = check_v2_party_sections()
+    n_ins = check_inscription_section()
+
     # ---- examples/01 - file artifact ----
     b01, _r01 = assemble_bundle(ART_LEAF, file_preimage(), "attestation",
                           {"exchange_id": "demoex", "business_date": "2026-05-28"}, chain=False)
@@ -912,6 +1373,177 @@ def main():
                     "fixtures/v4-rc-matrix.py re-runs the CLI and asserts exit codes.",
         "rows": expected}))
 
+    # ================= bundle v5 - role-labelled multi-signature (schema §12) =================
+    v5_expected = []
+
+    def wv5(rel, bundle):
+        w(os.path.join(HERE, rel), jdump(bundle))
+        v5_expected.append(v5_expect(rel, bundle))
+
+    SIG_ISSUER = {"role": "issuer", "alg": "webauthn-es256", "priv": ISSUER_PRIV, "listed": ISSUER_ID, "sign_count": 31}
+    SIG_CONSENT = {"role": "subject-consent", "alg": "webauthn-es256", "priv": SUBJECT_PRIV, "sign_count": 32}
+    SIG_ENDORSER = {"role": "endorser", "alg": "wallet-secp256k1", "priv": WALLET_PRIV}
+
+    # positives: the appendix C.1 composition (issuer passkey + subject-consent
+    # passkey + endorser wallet); an es256-plain HIGH-s co-issuer (the malleated
+    # twin must STAY valid - low-s is not enforced for 0x01/0x02); a single 0x04
+    # wallet bundle; a single-signature v5 with an open policy.
+    b_ms, d_ms = assemble_v5_bundle("valid-multisig", [SIG_ISSUER, SIG_CONSENT, SIG_ENDORSER])
+    wv5("v5/valid-multisig.json", b_ms)
+    b_hs, _ = assemble_v5_bundle("valid-highs-es256",
+        [SIG_ISSUER, {"role": "co-issuer", "alg": "es256-plain", "priv": ISSUER2_PRIV, "listed": ISSUER2_ID, "high_s": True}],
+        subject="none")
+    wv5("v5/valid-highs-es256.json", b_hs)
+    b_ws, _ = assemble_v4_bundle("valid-wallet-single", subject="idhash", alg="wallet-secp256k1",
+                                 schema="bitcert-proof-bundle/v5", policy=POLICY_OPEN, batch_id=V5_BATCH_ID,
+                                 issuer_entry=tl_entry(ISSUER_ID, WALLET_PUB, curve_id=V.CURVE_SECP256K1))
+    wv5("v5/valid-wallet-single.json", b_ws)
+    b_so, _ = assemble_v4_bundle("valid-single-openpolicy", subject="none", alg="es256-plain",
+                                 schema="bitcert-proof-bundle/v5", policy=POLICY_OPEN, batch_id=V5_BATCH_ID)
+    wv5("v5/valid-single-openpolicy.json", b_so)
+
+    # warning: valid consent signature, but not by the subject's OWN registered key (MUST 13)
+    b_cm, _ = assemble_v5_bundle("warn-consent-mismatch",
+        [SIG_ISSUER, {"role": "subject-consent", "alg": "webauthn-es256", "priv": CONSENT_OTHER_PRIV, "sign_count": 33}, SIG_ENDORSER])
+    wv5("v5/warn-consent-mismatch.json", b_cm)
+
+    # negatives - each built CONSISTENTLY so exactly the intended gate trips.
+    b_rl = json.loads(jdump(b_ms))
+    for sgn in b_rl["signers"]:
+        if sgn["role"] == "subject-consent": sgn["role"] = "co-issuer"   # role_ord 0 < 1 < 3 still ascends: parse passes, m_i no longer matches
+    wv5("v5/neg-role-relabel.json", b_rl)
+    b_ov = json.loads(jdump(b_ms)); b_ov["signers"] = [b_ov["signers"][1], b_ov["signers"][0]] + b_ov["signers"][2:]
+    wv5("v5/neg-order-violation.json", b_ov)
+    b_na = json.loads(jdump(b_ms)); b_na["signers"][1]["alg"] = "multisig"   # nesting is inexpressible; the closed alg map refuses it
+    wv5("v5/neg-nested-alg.json", b_na)
+    b_lw, _ = assemble_v5_bundle("neg-wallet-high-s", [SIG_ISSUER, SIG_CONSENT, dict(SIG_ENDORSER, high_s=True)])
+    wv5("v5/neg-wallet-high-s.json", b_lw)
+    b_pg, _ = assemble_v5_bundle("neg-policy-grammar", [SIG_ISSUER, SIG_CONSENT, SIG_ENDORSER],
+        policy={"document_type": "audit", "jurisdiction": "GENERIC", "Bad-Key": "x"})
+    wv5("v5/neg-policy-grammar.json", b_pg)
+    b_nt, _ = assemble_v5_bundle("neg-issuer-no-tlproof", [dict(SIG_ISSUER, listed=None), SIG_CONSENT, SIG_ENDORSER])
+    wv5("v5/neg-issuer-no-tlproof.json", b_nt)
+    b_he = json.loads(jdump(b_ms))
+    for sgn in b_he["signers"]:
+        if sgn["role"] == "issuer": sgn.pop("tl_proof")
+    wv5("v5/neg-tl-entry-only.json", b_he)
+    b_hp = json.loads(jdump(b_ms))
+    for sgn in b_hp["signers"]:
+        if sgn["role"] == "issuer": sgn.pop("tl_entry")
+    wv5("v5/neg-tl-proof-only.json", b_hp)
+    b_uf = json.loads(jdump(b_ms)); b_uf["signers"][1]["sl_proof"] = {"key": "00" * 32}
+    wv5("v5/neg-unknown-field.json", b_uf)
+    b_eb = json.loads(jdump(b_ms)); b_eb["issuer"] = {"issuer_id": ISSUER_ID.hex()}
+    wv5("v5/neg-envelope-both.json", b_eb)
+
+    # sanity: the oracle must say what the scenarios promise, AND the intended gate must be the one that tripped
+    want_v5 = {"v5/valid-multisig.json": 0, "v5/valid-highs-es256.json": 0, "v5/valid-wallet-single.json": 0,
+               "v5/valid-single-openpolicy.json": 0, "v5/warn-consent-mismatch.json": 2,
+               "v5/neg-role-relabel.json": 1, "v5/neg-order-violation.json": 1, "v5/neg-nested-alg.json": 1,
+               "v5/neg-wallet-high-s.json": 1, "v5/neg-policy-grammar.json": 1, "v5/neg-issuer-no-tlproof.json": 1,
+               "v5/neg-tl-entry-only.json": 1, "v5/neg-tl-proof-only.json": 1, "v5/neg-unknown-field.json": 1,
+               "v5/neg-envelope-both.json": 1}
+    assert len(v5_expected) == len(want_v5)
+    for r in v5_expected:
+        assert r["exit_code"] == want_v5[r["file"]], "%s: exit %d, expected %d" % (r["file"], r["exit_code"], want_v5[r["file"]])
+
+    def v5_step_state(rel, key):
+        return [s["state"] for r in v5_expected if r["file"] == rel for s in r["steps"] if s["key"] == key][0]
+    assert v5_step_state("v5/warn-consent-mismatch.json", "subject_binding") == "warn"
+    assert v5_step_state("v5/valid-multisig.json", "subject_binding") == "ok"
+    assert v5_step_state("v5/neg-role-relabel.json", "signer_sigs") == "bad"
+    assert v5_step_state("v5/neg-order-violation.json", "reassembly") == "bad"
+    assert v5_step_state("v5/neg-wallet-high-s.json", "signer_sigs") == "bad"
+    assert v5_step_state("v5/neg-policy-grammar.json", "policy") == "bad"
+    assert v5_step_state("v5/neg-issuer-no-tlproof.json", "trust_list") == "bad"
+    for rel in ("v5/neg-nested-alg.json", "v5/neg-tl-entry-only.json", "v5/neg-tl-proof-only.json",
+                "v5/neg-unknown-field.json", "v5/neg-envelope-both.json"):
+        assert v5_step_state(rel, "schema") == "bad", rel
+    # ---- ③ inscription tier (frozen spec 2026-09-02, MUST 14-26) ----------------
+    # Two positives (one chunk, and the 520-byte chunking rule in force), the
+    # undetermined case, and one COMPLETE v5 file per engine-KAT negative. Each
+    # negative is otherwise fully consistent, so the gate it is named after is the
+    # only one that can trip - asserted below against the KAT's own error id.
+    h = bytes.fromhex
+    ins_want = {}
+
+    def wv5_ins(rel, bundle, exit_code, step_key=None, error=None):
+        wv5(rel, bundle)
+        ins_want[rel] = (exit_code, step_key, error)
+
+    b_is = assemble_inscription_bundle(envelope="single")
+    wv5_ins("v5/ins-valid-single.json", b_is, 3)
+    b_im = assemble_inscription_bundle(envelope="multisig")
+    wv5_ins("v5/ins-valid-multisig.json", b_im, 3)
+    wv5_ins("v5/ins-undet-no-reveal-tx.json",
+            assemble_inscription_bundle(envelope="single", drop_reveal_tx=True), 3)
+
+    INS_STAGE_STEP = {"envelope": "ins_envelope", "binding": "ins_binding", "witness": "ins_envelope",
+                      "anchor": "ins_anchor", "batch": "ins_batch", "bundle": "schema"}
+    kat_sig, kat_cb = h(INS["reveal"]["witness"][0]), h(INS["reveal"]["witness"][2])
+    for nc in INS["negative"]:
+        rel = "v5/ins-neg-%s.json" % nc["name"].replace("_", "-")
+        stage = nc["stage"]
+        if stage in ("envelope", "binding"):
+            b = assemble_inscription_bundle(witness=[kat_sig, h(nc["script"]), kat_cb])
+        elif stage == "witness":
+            b = assemble_inscription_bundle(witness=[h(x) for x in nc["witness"]],
+                                            witness_item_index=nc["witness_item_index"])
+        elif stage == "anchor":
+            b = assemble_inscription_bundle(flags=nc["flags"], envelope_root=nc["envelope_root"],
+                                            with_inscription=nc["has_inscription"])
+        elif stage == "batch":
+            b = assemble_inscription_bundle(merkle=nc["merkle"])
+        elif nc["name"] == "bundle_v4_with_inscription":
+            b = assemble_inscription_bundle(schema="bitcert-proof-bundle/v4")
+        elif nc["name"] == "bundle_inscription_unknown_field":
+            b = assemble_inscription_bundle()
+            b["inscription"][nc["offending_key"]] = nc["inscription"][nc["offending_key"]]
+        elif nc["name"] == "bundle_anchor_unknown_field":
+            b = assemble_inscription_bundle()
+            b["anchor"][nc["offending_key"]] = nc["anchor"][nc["offending_key"]]
+        else:                                     # bundle_signer_unknown_field
+            b = assemble_inscription_bundle(envelope="multisig")
+            for sgn in b["signers"]:
+                if sgn["role"] == nc["signer"]["role"]:
+                    sgn[nc["offending_key"]] = nc["signer"][nc["offending_key"]]
+        wv5_ins(rel, b, 1, INS_STAGE_STEP[stage], nc["error"] if stage != "bundle" else nc["offending_key"])
+
+    # Beyond the KAT: MUST 20 needs the script_key back, so a leaf whose key is
+    # not an x-only POINT cannot be re-serialised and is refused. And the anchor
+    # whitelist has to refuse a key the KAT never names.
+    bad_key_script = h(INS["envelopes"]["single"]["script"])
+    bad_key_script = b"\x20" + b"\xff" * 32 + bad_key_script[33:]
+    wv5_ins("v5/ins-neg-invalid-script-key.json",
+            assemble_inscription_bundle(witness=[kat_sig, bad_key_script, kat_cb]), 1,
+            "ins_envelope", "invalid_script_key")
+    b_ak = assemble_inscription_bundle()
+    b_ak["anchor"]["x_note"] = "a security field must not be able to hide here"
+    wv5_ins("v5/ins-neg-anchor-unknown-key.json", b_ak, 1, "schema", "x_note")
+
+    # sanity: the exit code AND the gate that produced it, per the KAT contract
+    ins_rows = {r["file"]: r for r in v5_expected if r["file"] in ins_want}
+    assert len(ins_rows) == len(ins_want)
+    for rel, (want_rc, step_key, error) in ins_want.items():
+        row = ins_rows[rel]
+        assert row["exit_code"] == want_rc, "%s: exit %d, expected %d" % (rel, row["exit_code"], want_rc)
+        if step_key is None:
+            continue
+        states = {s["key"]: s["state"] for s in row["steps"]}
+        assert states.get(step_key) == "bad", "%s: step %s is %r, expected bad" % (rel, step_key, states.get(step_key))
+        R = V.verify_v5(json.load(open(os.path.join(HERE, rel), encoding="utf-8")), now=FIXTURE_NOW)
+        said = [s for s in R.steps if s["key"] == step_key and error in (s["title"] + s["detail"])]
+        assert said, "%s: step %s does not name %r - the fixture may be failing for the WRONG reason" % (rel, step_key, error)
+    assert [r["axes"].get("publication") for r in v5_expected if r["file"] == "v5/ins-valid-single.json"] == ["committed"]
+    assert all("publication" not in r["axes"] for r in v5_expected if not r["file"].startswith("v5/ins-")), \
+        "the publication axis must appear ONLY for a bundle that claims ③ (the v5 oracle rows are frozen)"
+
+    w(os.path.join(HERE, "v5-expected.json"), jdump({
+        "_comment": "Oracle produced by verify.py (fixtures/generate.py) for bundle v5 (schema §12). Rows: file (+now) → "
+                    "grade, exit_code, axes, per-step state. fixtures/v5-grade-check.mjs must reproduce every row from index.html's runV5; "
+                    "fixtures/v5-rc-matrix.py re-runs the CLI and asserts exit codes.",
+        "rows": v5_expected}))
+
     # ---- examples 09–14 ----
     def ex(name, bundle, expected_txt, readme, extra=None):
         d = os.path.join(EX, name)
@@ -1070,6 +1702,10 @@ echo; [ "$fail" = 0 ] && echo "ALL EXAMPLES OK" || { echo "SOME EXAMPLES FAILED"
     print("  v4: leaf_input(none)=%s" % d_none["leaf_input"].hex())
     print("      leaf_input(pubkey)=%s aux=%s" % (d_pk["leaf_input"].hex(), d_pk["aux"].hex()))
     print("      oracle rows: %d (fixtures/v4-expected.json); KAT file is the engine copy, not regenerated" % len(expected))
+    print("  v2 party sections: %d KAT checks green (cosign/wallet/multisig/policy/negatives)" % n_v2)
+    print("  ③ inscription: %d KAT checks green (envelope/witness/anchor/batch/bundle + 29 negatives)" % n_ins)
+    print("  v5: leaf_input(multisig)=%s s=%d B" % (d_ms["leaf_input"].hex(), len(d_ms["s"])))
+    print("      oracle rows: %d (fixtures/v5-expected.json)" % len(v5_expected))
 
 if __name__ == "__main__":
     main()

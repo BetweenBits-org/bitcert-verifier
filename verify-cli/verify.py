@@ -24,7 +24,9 @@ Usage:
   --original FILE     hash this file and confirm it equals leaf_bytes (sha256-file) / doc_sha256 (v4)
   --account ID        your account id, to reproduce the salted commitment (daily scheme)
   --salt HEX          your per-customer salt (held privately; NOT in the public bundle)
-  --explorer URL      a Bitcoin source YOU choose for the on-chain step (never BitCert)
+  --explorer URL      a Bitcoin source YOU choose for the on-chain step (never BitCert).
+                      For a v5 `inscription` bundle it also fetches /api/tx/<txid>/hex
+                      and compares the witness-bearing transaction byte for byte (MUST 26)
   --identifier STR    v4 subject_type 1: the identifier the issuer wrote (recomputes the salted ref)
   --present BLOB|FILE v4: the /present blob (base64url or JSON) the recipient handed you
   --nonce HEX         v4: the 16-byte nonce YOU generated for that presentation (ownership)
@@ -37,6 +39,19 @@ Usage:
 
 Exit codes: 0 valid · 1 rejected · 2 warning · 3 undetermined · 64 usage / not JSON.
 Legacy bundles (v1–v3) keep their 0/1 meaning. Requires Python >= 3.8.
+
+v5 bundles (role-labelled multi-signature issuance, schema §12) take the same
+options: a signers[] bundle runs the §12.6 pipeline (MUST 1-13), a
+single-signature v5 bundle runs the v4 pipeline plus the §12.8 additions
+(0x04 wallet issuer, open policy grammar, alg↔curve).
+
+A v5 bundle carrying an `inscription` section (schema §13, the ③ tier) adds
+MUST 14-26 on top: the reveal witness holds the 143-byte record and the issuer
+signature bytes, and they are bound to the record this bundle already proved.
+That the envelope was PUBLISHED is a separate axis - offline the verifier says
+`publication: committed` and grades that step undetermined (exit 3); only
+--explorer, comparing the witness-bearing transaction byte for byte, reaches
+`publication: published`.
 """
 import hashlib
 import json
@@ -52,6 +67,11 @@ SCHEMAS = ("bitcert-proof-bundle/v1", "bitcert-proof-bundle/v2", "bitcert-proof-
 # it; this CLI reports that section as UNDETERMINED rather than pretending.
 # v4 is the identity-bound issuance bundle (schema §2.3/§9–§11) - see verify_v4.
 SCHEMA_V4 = "bitcert-proof-bundle/v4"
+# v5 is the role-labelled multi-signature issuance bundle (schema §12): an open
+# policy grammar, the 0x04 wallet issuer signature and the 0x10 signers[]
+# envelope. A single-signature v5 bundle keeps the v4 pipeline (verify_v4
+# detects the schema and adds MUST 3/11/12); signers[] takes verify_v5_multi.
+SCHEMA_V5 = "bitcert-proof-bundle/v5"
 CHAIN_DOMAIN = b"bitcert:chain:v1\n"
 
 # ----- ANSI (auto-disabled when not a tty) -----
@@ -525,6 +545,10 @@ CURVE_P256 = 1
 LEAF_TYPE_ISSUANCE = 1
 ALG_WEBAUTHN_ES256, ALG_ES256_PLAIN = 1, 2
 ALG_NAMES = {"webauthn-es256": ALG_WEBAUTHN_ES256, "es256-plain": ALG_ES256_PLAIN}
+# v5 adds issuer_alg 0x04 (schema §12.3); 0x03 (BIP-340) stays reserved-and-refused.
+ALG_NAMES_V5 = {"webauthn-es256": 1, "es256-plain": 2, "wallet-secp256k1": 4}
+# MUST 3 (§12.6): the es256 family lives on P-256, the wallet alg on secp256k1.
+ALG_CURVE_V5 = {"webauthn-es256": 1, "es256-plain": 1, "wallet-secp256k1": 2}
 
 OP_RETURN_V30_VERSION = 0x1E           # decode-only (mined anchors exist forever)
 OP_RETURN_V31_VERSION = 0x1F
@@ -908,14 +932,30 @@ class V4Report(object):
         return {"grade": self.grade, "exit_code": self.exit_code, "axes": dict(self.axes),
                 "steps": [{"num": s["num"], "key": s["key"], "state": s["state"]} for s in self.steps]}
 
+V4_TOP_LEVEL_FIELDS = ("schema", "bitcoin_network", "generated_at", "record", "merkle",
+                       "anchor", "issuer", "subject", "aux", "presentation", "chain")
+
 def _v4_schema_problems(b):
+    # Serves v4 AND single-signature v5 (schema §12.8): v5 additionally admits
+    # the wallet-secp256k1 issuer alg and curve_id 2. v4 behaviour is frozen.
+    v5 = b.get("schema") == SCHEMA_V5
     p = []
     for k in ("record", "merkle", "anchor", "issuer", "aux"):
         if not isinstance(b.get(k), dict): p.append("missing section %r" % k)
     if p: return p
-    known = ("schema", "bitcoin_network", "generated_at", "record", "merkle", "anchor", "issuer", "subject", "aux", "presentation", "chain")
+    known = V4_TOP_LEVEL_FIELDS
+    if v5: known = known + ("inscription",)          # ③ (MUST 14) - v5 only
     for k in b:
-        if k not in known: p.append("unknown top-level key `%s` (a v4 bundle carries only: %s)" % (k, ", ".join(known)))
+        if k in known: continue
+        if k == "inscription":
+            p.append("a v4 bundle must not carry `inscription` - the ③ inscription tier is v5 only")
+        else:
+            p.append("unknown top-level key `%s` (a v4 bundle carries only: %s)" % (k, ", ".join(known)))
+    if v5 and "inscription" in b: p += _inscription_schema_problems(b["inscription"])
+    if v5:
+        for k in b["anchor"]:
+            if k not in ANCHOR_FIELDS_V5 and k != "witness_envelope":
+                p.append("anchor.%s is not an allowed field (a security field must not be able to hide under `anchor`)" % k)
     if b.get("reconciliation") is not None: p.append("v4 does not allow `reconciliation`")
     if b["anchor"].get("witness_envelope") is not None: p.append("v4 does not allow `witness_envelope`")
     rec, pre = b["record"], b["record"].get("preimage")
@@ -946,7 +986,10 @@ def _v4_schema_problems(b):
         sub = b.get("subject")
         if not isinstance(sub, dict): p.append("subject section required for subject_type 2")
         else:
-            if sub.get("curve_id") != CURVE_P256: p.append("subject.curve_id must be 1 (P-256)")
+            if v5:
+                if sub.get("curve_id") not in (CURVE_P256, CURVE_SECP256K1) or isinstance(sub.get("curve_id"), bool):
+                    p.append("subject.curve_id must be 1 (P-256) or 2 (secp256k1)")
+            elif sub.get("curve_id") != CURVE_P256: p.append("subject.curve_id must be 1 (P-256)")
             try: _hexb(sub.get("public_key"), 33, "subject.public_key")
             except ValueError as e: p.append(str(e))
     iss = b["issuer"]
@@ -954,15 +997,24 @@ def _v4_schema_problems(b):
     except ValueError as e: p.append(str(e))
     try: _hexb(iss.get("key_id"), 32, "issuer.key_id")
     except ValueError as e: p.append(str(e))
-    if iss.get("alg") not in ALG_NAMES: p.append("issuer.alg must be webauthn-es256 | es256-plain")
+    if v5:
+        if iss.get("alg") not in ALG_NAMES_V5: p.append("issuer.alg must be webauthn-es256 | es256-plain | wallet-secp256k1")
+    elif iss.get("alg") not in ALG_NAMES: p.append("issuer.alg must be webauthn-es256 | es256-plain")
     asn = iss.get("assertion")
     if not isinstance(asn, dict): p.append("issuer.assertion missing")
     else:
-        need = ("signature_der",) if iss.get("alg") == "es256-plain" else ("authenticator_data", "client_data_json", "signature_der")
+        if v5 and iss.get("alg") == "wallet-secp256k1":
+            need = ("signature_rs",)
+        elif iss.get("alg") == "es256-plain":
+            need = ("signature_der",)
+        else:
+            need = ("authenticator_data", "client_data_json", "signature_der")
         for k in need:
             v = asn.get(k)
             if not isinstance(v, str) or not v or len(v) % 2 or not re.match(r"^[0-9a-fA-F]*$", v):
                 p.append("issuer.assertion.%s must be hex" % k)
+            elif k == "signature_rs" and len(v) != 128:
+                p.append("issuer.assertion.signature_rs must be 128 hex chars (r ‖ s, 64 B)")
     aux = b["aux"]
     if aux.get("scheme") != "bc30-aux-v2": p.append("aux.scheme must be \"bc30-aux-v2\"")
     for k in ("tl_root", "sl_root", "envelope_root"):
@@ -974,7 +1026,10 @@ def _v4_schema_problems(b):
         for k, n in (("issuer_id", 16), ("key_id", 32), ("public_key", 33)):
             try: _hexb(tle.get(k), n, "aux.tl_entry." + k)
             except ValueError as e: p.append(str(e))
-        if tle.get("curve_id") != CURVE_P256 or isinstance(tle.get("curve_id"), bool): p.append("aux.tl_entry.curve_id must be 1 (P-256)")
+        if v5:
+            if tle.get("curve_id") not in (CURVE_P256, CURVE_SECP256K1) or isinstance(tle.get("curve_id"), bool):
+                p.append("aux.tl_entry.curve_id must be 1 (P-256) or 2 (secp256k1)")
+        elif tle.get("curve_id") != CURVE_P256 or isinstance(tle.get("curve_id"), bool): p.append("aux.tl_entry.curve_id must be 1 (P-256)")
         for k in ("valid_from", "valid_to", "revoked_at"):
             v = tle.get(k)
             if not isinstance(v, int) or isinstance(v, bool) or v < 0: p.append("aux.tl_entry.%s must be a non-negative integer" % k)
@@ -987,7 +1042,11 @@ def _v4_schema_problems(b):
 def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=None, origins=None,
               now=None, explorer=None, original_bytes=None):
     """docs/bundle-schema.md §11 - 19 numbered steps (0–18), four grades, two axes.
-    Never raises on bundle content; every step records ok/bad/warn/undet/skip."""
+    Never raises on bundle content; every step records ok/bad/warn/undet/skip.
+    Also runs single-signature v5 bundles (schema §12.8): detected from the
+    schema string, adding MUST 3 (alg↔curve), MUST 11 (policy grammar) and the
+    0x04 wallet issuer branch. The v4 behaviour is frozen byte for byte."""
+    v5 = bundle.get("schema") == SCHEMA_V5
     R = V4Report()
     rp_id = rp_id or BC30_RP_ID
     origins = list(origins) if origins else list(BC30_ORIGINS)
@@ -997,9 +1056,9 @@ def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=
     # 0 · schema
     probs = _v4_schema_problems(bundle)
     if probs:
-        R.step(0, "schema", "bad", "0 · Schema - bundle is not a well-formed v4 issuance bundle", "\n".join(probs))
+        R.step(0, "schema", "bad", "0 · Schema - bundle is not a well-formed %s issuance bundle" % ("v5" if v5 else "v4"), "\n".join(probs))
         return R
-    R.step(0, "schema", "ok", "0 · Schema - bitcert-proof-bundle/v4 issuance · network: %s" % bundle.get("bitcoin_network", "?"),
+    R.step(0, "schema", "ok", "0 · Schema - %s issuance · network: %s" % ("bitcert-proof-bundle/v5 (single signature)" if v5 else "bitcert-proof-bundle/v4", bundle.get("bitcoin_network", "?")),
            "sections: record · merkle · anchor · issuer · aux" + (" · subject" if bundle.get("subject") else "")
            + (" · presentation" if bundle.get("presentation") else ""))
     rec, pre, anchor, iss, aux = bundle["record"], bundle["record"]["preimage"], bundle["anchor"], bundle["issuer"], bundle["aux"]
@@ -1019,22 +1078,36 @@ def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=
         elif not decoded["flags"] & FLAG_IDENTITY_BOUND:
             R.step(1, "payload", "bad", "1 · Anchor payload - IDENTITY_BOUND (bit 1) not set",
                    "this anchor is not a bound batch; a v4 bundle cannot ride on it")
+        elif decoded["flags"] & FLAG_WITNESS_PRESENT and v5 and "inscription" in bundle:
+            R.step(1, "payload", "ok", "1 · Anchor payload - v31 (0x1F), flags 0b11, IDENTITY_BOUND + WITNESS_PRESENT (③ inscription)",
+                   "batch_id: %s\naux_commitment: %s" % (decoded["batch_id"], decoded["aux"]))
         elif decoded["flags"] & FLAG_WITNESS_PRESENT:
-            R.step(1, "payload", "warn", "1 · Anchor payload - v31, IDENTITY_BOUND + WITNESS_PRESENT",
-                   "a bound batch with a witness is undefined in this revision; treated as a warning")
+            R.step(1, "payload", "bad", "1 · Anchor payload - WITNESS_PRESENT (bit 0) is set, but no ③ envelope is carried",
+                   "flags 0b11 is the ③ discriminator (MUST 16): with bit 0 set the bundle MUST carry `inscription`.\n"
+                   "This is a refusal, not a warning - the previous revision only warned here.")
         else:
             R.step(1, "payload", "ok", "1 · Anchor payload - v31 (0x1F), flags 0b%s, IDENTITY_BOUND" % format(decoded["flags"], "02b"),
                    "batch_id: %s\naux_commitment: %s" % (decoded["batch_id"], decoded["aux"]))
     except Exception as e:
         R.step(1, "payload", "bad", "1 · Anchor payload - error", str(e))
 
-    # 2 · policy_hash
+    # 2 · policy_hash (v5 additionally gates the §12.1 grammar - MUST 11)
     ph = None
     try:
         ph = policy_hash(pre["policy"])
         ok = ph.hex() == pre["policy_hash"].lower()
-        R.step(2, "policy", "ok" if ok else "bad", "2 · Policy hash - %s" % ("recomputes ✓" if ok else "MISMATCH ✗"),
-               "JCS: %s\nrecomputed: %s" % (policy_jcs(pre["policy"]).decode("utf-8"), ph.hex()))
+        grammar_err = None
+        if v5 and ok:
+            try:
+                policy_validate(pre["policy"])
+            except PolicyError as pe:
+                grammar_err = str(pe)
+        if grammar_err is not None:
+            R.step(2, "policy", "bad", "2 · Policy - hash recomputes, but the grammar is violated ✗ (MUST 11)",
+                   "%s\nJCS: %s" % (grammar_err, policy_jcs(pre["policy"]).decode("utf-8")))
+        else:
+            R.step(2, "policy", "ok" if ok else "bad", "2 · Policy hash - %s" % ("recomputes ✓" if ok else "MISMATCH ✗"),
+                   "JCS: %s\nrecomputed: %s" % (policy_jcs(pre["policy"]).decode("utf-8"), ph.hex()))
     except Exception as e:
         R.step(2, "policy", "bad", "2 · Policy hash - error", str(e))
 
@@ -1062,11 +1135,14 @@ def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=
         try:
             sub = bundle["subject"]
             subject_pk = bytes.fromhex(sub["public_key"])
-            p256_decompress(subject_pk)                       # on-curve, canonical x
+            if v5 and sub["curve_id"] == CURVE_SECP256K1:
+                secp256k1_decompress(subject_pk)              # on-curve, canonical x
+            else:
+                p256_decompress(subject_pk)                   # on-curve, canonical x
             got = subject_ref_pubkey(sub["curve_id"], subject_pk)
             ok = got == ref
             R.step(3, "subject", "ok" if ok else "bad", "3 · Subject - registered key %s subject_ref" % ("normalises to ✓" if ok else "does NOT match ✗"),
-                   "SHA256(0x02 ‖ curve 0x01 ‖ pubkey): %s\npublic_key: %s" % (got.hex(), sub["public_key"]))
+                   "SHA256(0x02 ‖ curve 0x%02x ‖ pubkey): %s\npublic_key: %s" % (sub["curve_id"], got.hex(), sub["public_key"]))
             if not ok: subject_pk = None
         except Exception as e:
             R.step(3, "subject", "bad", "3 · Subject - public key unusable", str(e))
@@ -1095,11 +1171,29 @@ def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=
     s_bytes, issuer_pk = None, None
     try:
         issuer_pk = bytes.fromhex(aux["tl_entry"]["public_key"])
-        asn, alg = iss["assertion"], ALG_NAMES[iss["alg"]]
-        sig = bytes.fromhex(asn["signature_der"])
+        asn, alg = iss["assertion"], (ALG_NAMES_V5 if v5 else ALG_NAMES)[iss["alg"]]
         if m is None:
             raise ValueError("message m unavailable")
-        if alg == ALG_WEBAUTHN_ES256:
+        if alg == ALG_WALLET_SECP256K1:
+            # §12.3: s = 0x04 ‖ r ‖ s; the digest is verified DIRECTLY; low-s enforced.
+            rs = bytes.fromhex(asn["signature_rs"])
+            s_bytes = b"\x04" + rs                        # leaf commits the submitted bytes
+            r_int, s_int = int.from_bytes(rs[:32], "big"), int.from_bytes(rs[32:], "big")
+            digest = bitcoin_message_digest(wallet_issuance_message(m))
+            if not (1 <= r_int < _SECP256K1_N and 1 <= s_int < _SECP256K1_N):
+                R.step(5, "issuer_sig", "bad", "5 · Issuer signature - wallet-secp256k1 REJECTED ✗",
+                       "r or s out of [1, n−1]")
+            elif not secp256k1_is_low_s(s_int):
+                R.step(5, "issuer_sig", "bad", "5 · Issuer signature - wallet-secp256k1 REJECTED ✗",
+                       "s > n/2 - low-s is enforced for 0x04 (normalisation is ingestion's job)")
+            else:
+                ok = secp256k1_verify_digest(issuer_pk, digest, r_int, s_int)
+                R.step(5, "issuer_sig", "ok" if ok else "bad",
+                       "5 · Issuer signature - wallet-secp256k1 %s" % ("verifies ✓" if ok else "REJECTED ✗"),
+                       "message: %s\ndigest (double-SHA256): %s\nkey_id %s" % (
+                           wallet_issuance_message(m).decode("ascii"), digest.hex(), iss["key_id"]))
+        elif alg == ALG_WEBAUTHN_ES256:
+            sig = bytes.fromhex(asn["signature_der"])
             ad, cdj = bytes.fromhex(asn["authenticator_data"]), bytes.fromhex(asn["client_data_json"])
             ok, reasons, facts = webauthn_verify_assertion(issuer_pk, ad, cdj, sig, m, rp_id, origins)
             s_bytes = issuer_sig_bytes(alg, sig, ad, cdj)
@@ -1110,6 +1204,7 @@ def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=
                    "5 · Issuer signature - webauthn-es256 %s" % ("verifies ✓" if ok else "REJECTED ✗"),
                    detail + ("" if ok else "\n" + "\n".join("· " + r for r in reasons)))
         else:
+            sig = bytes.fromhex(asn["signature_der"])
             ok = p256_verify(issuer_pk, m, sig)
             s_bytes = issuer_sig_bytes(alg, sig)
             R.step(5, "issuer_sig", "ok" if ok else "bad",
@@ -1154,9 +1249,14 @@ def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=
     tle = aux["tl_entry"]
     try:
         pk = bytes.fromhex(tle["public_key"])
-        if tle.get("curve_id") != CURVE_P256: raise ValueError("tl_entry.curve_id must be 1")
+        if v5:
+            if tle.get("curve_id") not in (CURVE_P256, CURVE_SECP256K1): raise ValueError("tl_entry.curve_id must be 1 or 2")
+        elif tle.get("curve_id") != CURVE_P256: raise ValueError("tl_entry.curve_id must be 1")
         kid = key_id(tle["curve_id"], pk)
         probs = []
+        if v5 and tle["curve_id"] != ALG_CURVE_V5[iss["alg"]]:
+            probs.append("issuer.alg %s requires curve_id %d, tl_entry has %d (MUST 3)"
+                         % (iss["alg"], ALG_CURVE_V5[iss["alg"]], tle["curve_id"]))
         if kid.hex() != str(tle.get("key_id", "")).lower(): probs.append("tl_entry.key_id ≠ SHA256(0x02‖curve‖pubkey)")
         if kid.hex() != iss["key_id"].lower(): probs.append("issuer.key_id ≠ tl_entry key")
         if str(tle.get("issuer_id", "")).lower() != iss["issuer_id"].lower(): probs.append("issuer.issuer_id ≠ tl_entry.issuer_id")
@@ -1173,10 +1273,14 @@ def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=
     except Exception as e:
         R.step(9, "trust_list", "bad", "9 · Trust list - error", str(e))
 
-    # 10 · envelope_root
+    # 10 · envelope_root (a ③ bundle commits a real one - recomputed from the witness below)
     ok = aux["envelope_root"].lower() == envelope_root_none().hex()
-    R.step(10, "envelope", "ok" if ok else "bad", "10 · Envelope root - %s" % ("constant (envelope-none tag) ✓" if ok else "unexpected value ✗"),
-           "" if ok else "expected %s" % envelope_root_none().hex())
+    if not ok and v5 and "inscription" in bundle:
+        R.step(10, "envelope", "ok", "10 · Envelope root - an inscription envelope (③) is committed here ✓",
+               "%s\nrecomputed from the reveal witness in the ③ steps below" % aux["envelope_root"].lower())
+    else:
+        R.step(10, "envelope", "ok" if ok else "bad", "10 · Envelope root - %s" % ("constant (envelope-none tag) ✓" if ok else "unexpected value ✗"),
+               "" if ok else "expected %s" % envelope_root_none().hex())
 
     # 11 · aux recompute
     try:
@@ -1344,6 +1448,11 @@ def verify_v4(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=
     else:
         R.step(18, "onchain", "skip", "18 · On-chain confirmation - SKIPPED (offline / no --explorer)",
                "txid: %s\npass --explorer <url> (any Bitcoin source, never BitCert) to confirm and compare block_time" % txid)
+
+    # 19+ · ③ inscription tier (MUST 14-26). Appended ONLY when the bundle claims
+    # it, so a bundle that does not is byte for byte the report it was before.
+    if v5 and _inscription_claimed(bundle, decoded):
+        _inscription_steps(R, bundle, decoded, 19, Rb, s_bytes, explorer)
     return R
 
 def present_url(console, leaf_input_hex, nonce, verifier_id, expiry):
@@ -1360,6 +1469,1670 @@ def leaf_input_from_bundle(bundle):
     s = issuer_sig_bytes(alg, sig, bytes.fromhex(asn["authenticator_data"]), bytes.fromhex(asn["client_data_json"])) \
         if alg == ALG_WEBAUTHN_ES256 else issuer_sig_bytes(alg, sig)
     return leaf_input_v2(LEAF_TYPE_ISSUANCE, record_bytes(*args), s)
+
+# =============================================================================
+# leaf v2 party-model primitives / bundle v5 (docs/bundle-schema.md §12)
+#
+# N0 scope: the frozen PRIMITIVES only - cosign message, the 0x10 multi-signature
+# envelope parser/assembler, secp256k1 ECDSA (issuer_alg 0x04), the Bitcoin
+# message digest, and the appendix-B policy grammar gate. The full v5 bundle
+# pipeline (signers[] verification, MUST 1-13) lands in N1; until then a v5
+# bundle is reported as "Unsupported schema" → REJECTED, by design.
+#
+# Oracle: fixtures/bc30-v2-vectors.json sections `cosign`, `wallet`, `multisig`,
+# `policy_open`, `es256_plain_alternate_s`, `negative_v2` (byte-identical copy of
+# ann-core/crates/bc30-leaf/tests/vectors/bc30-v2-kat.json). --selftest and
+# fixtures/generate.py both run kat_v2_party_checks() against it.
+# =============================================================================
+
+COSIGN_TAG = b"BC30/cosign/v1"
+ALG_WALLET_SECP256K1 = 4               # issuer_alg 0x04: s = 0x04 ‖ r(32) ‖ s(32), 65 B
+ALG_MULTISIG = 0x10                    # issuer_alg 0x10: role-labelled multi-signature
+CURVE_SECP256K1 = 2                    # curve_id 2 = secp256k1 (1 = P-256)
+# role_ord is a SORT-ONLY constant, never on the wire; the vocabulary is closed
+# (an open list would let an undefined role dodge the tl_proof requirement).
+ROLE_ORD = {"issuer": 0, "co-issuer": 1, "subject-consent": 2, "endorser": 3}
+MULTISIG_MIN_COUNT, MULTISIG_MAX_COUNT = 2, 8
+MULTISIG_MAX_LEN = 8192                # the 8 KB cap applies to the 0x10 envelope ONLY
+INNER_ALG_CURVE = {ALG_WEBAUTHN_ES256: CURVE_P256, ALG_ES256_PLAIN: CURVE_P256,
+                   ALG_WALLET_SECP256K1: CURVE_SECP256K1}
+
+WALLET_MSG_ISSUANCE = b"BC30 issuance "          # ‖ lowercase_hex(m)   (single-sig)
+WALLET_MSG_COSIGN = b"BC30 cosign "              # ‖ lowercase_hex(m_i) (0x10 entry)
+WALLET_MSG_REGISTRATION = b"BC30 key registration "  # ‖ lowercase_hex(challenge)
+BITCOIN_MSG_PREFIX = b"\x18Bitcoin Signed Message:\n"
+
+def cosign_message(m, role):
+    """m_i = SHA256("BC30/cosign/v1" ‖ m ‖ role_len(1) ‖ role_utf8). EVERY 0x10
+    entry signs its own m_i - the first entry included; the role being inside the
+    signed message is what makes re-labelling detectable at verification."""
+    role_b = role.encode("utf-8")
+    if not (1 <= len(role_b) <= 32):
+        raise ValueError("role must be 1..32 UTF-8 bytes")
+    return sha256(COSIGN_TAG + _need(m, 32, "m") + bytes([len(role_b)]) + role_b)
+
+# ----- secp256k1 (SEC 2 v2.0 §2.4.1) - same plain-affine style as P-256 above -----
+# a = 0, so the doubling slope loses the +a term; everything else is the same
+# arithmetic with the secp256k1 field/order/generator. Exercised by --selftest
+# against the engine KAT (wallet + multisig sections).
+_SECP256K1_P = 2**256 - 2**32 - 977
+_SECP256K1_B = 7
+_SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+_SECP256K1_G = (0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,
+                0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8)
+
+def _k1_double(P):
+    if P is None: return None
+    x, y = P
+    if y == 0: return None
+    lam = (3 * x * x) * pow(2 * y, -1, _SECP256K1_P) % _SECP256K1_P
+    x3 = (lam * lam - 2 * x) % _SECP256K1_P
+    return (x3, (lam * (x - x3) - y) % _SECP256K1_P)
+
+def _k1_add(P, Q):
+    if P is None: return Q
+    if Q is None: return P
+    x1, y1 = P; x2, y2 = Q
+    if x1 == x2:
+        if (y1 + y2) % _SECP256K1_P == 0: return None
+        return _k1_double(P)
+    lam = (y2 - y1) * pow((x2 - x1) % _SECP256K1_P, -1, _SECP256K1_P) % _SECP256K1_P
+    x3 = (lam * lam - x1 - x2) % _SECP256K1_P
+    return (x3, (lam * (x1 - x3) - y1) % _SECP256K1_P)
+
+def _k1_mul(P, k):
+    R, Q = None, P
+    while k > 0:
+        if k & 1: R = _k1_add(R, Q)
+        Q = _k1_double(Q); k >>= 1
+    return R
+
+def secp256k1_decompress(pk33):
+    """SEC1 compressed (02/03 ‖ x) → (x, y) on secp256k1. Rejects wrong
+    length/prefix, x ≥ p, and x not on the curve. Raises ValueError."""
+    if len(pk33) != 33 or pk33[0] not in (2, 3):
+        raise ValueError("public key must be 33-byte SEC1 compressed (02/03 ‖ x)")
+    x = int.from_bytes(pk33[1:], "big")
+    if x >= _SECP256K1_P:
+        raise ValueError("public key x is not a canonical field element")
+    rhs = (x * x * x + _SECP256K1_B) % _SECP256K1_P
+    y = pow(rhs, (_SECP256K1_P + 1) // 4, _SECP256K1_P)      # p ≡ 3 (mod 4)
+    if y * y % _SECP256K1_P != rhs:
+        raise ValueError("public key x is not on secp256k1")
+    if (y & 1) != (pk33[0] & 1):
+        y = _SECP256K1_P - y
+    return (x, y)
+
+def secp256k1_compress(P):
+    x, y = P
+    return bytes([2 + (y & 1)]) + x.to_bytes(32, "big")
+
+def secp256k1_is_low_s(s):
+    """low-s = s in [1, n/2]. Enforced for issuer_alg 0x04 ONLY (ingestion
+    normalises high-s to n−s before anything is committed); es256 (0x01/0x02)
+    deliberately does NOT enforce it - see the selftest's (r, n−s) check."""
+    return 1 <= s <= _SECP256K1_N // 2
+
+def secp256k1_verify_digest(pub33, digest32, r, s):
+    """ECDSA over secp256k1 against a PRECOMPUTED 32-byte digest. The digest is
+    already double-SHA256 of the Bitcoin message - hashing it again here would
+    verify a different message, so this function never hashes."""
+    Q = secp256k1_decompress(pub33)
+    if not (1 <= r < _SECP256K1_N and 1 <= s < _SECP256K1_N):
+        raise ValueError("r/s out of range [1, n-1]")
+    e = int.from_bytes(_need(digest32, 32, "digest"), "big") % _SECP256K1_N
+    w = pow(s, -1, _SECP256K1_N)
+    u1, u2 = e * w % _SECP256K1_N, r * w % _SECP256K1_N
+    X = _k1_add(_k1_mul(_SECP256K1_G, u1), _k1_mul(Q, u2))
+    if X is None: return False
+    return X[0] % _SECP256K1_N == r
+
+def secp256k1_recover(digest32, header, r, s):
+    """Registration proof of possession: recover the signing key from the
+    65-byte recoverable form header(27..=34) ‖ r ‖ s, ONCE, at registration.
+    Returns the 33-byte compressed key regardless of the header's compression
+    hint; low-s is NOT enforced on this path. Raises ValueError."""
+    if not (27 <= header <= 34):
+        raise ValueError("recovery header must be 27..=34, got %d" % header)
+    if not (1 <= r < _SECP256K1_N and 1 <= s < _SECP256K1_N):
+        raise ValueError("r/s out of range [1, n-1]")
+    recid = (header - 27) & 3
+    x = r + (_SECP256K1_N if recid >= 2 else 0)
+    if x >= _SECP256K1_P:
+        raise ValueError("recovery x is not a canonical field element")
+    rhs = (x * x * x + _SECP256K1_B) % _SECP256K1_P
+    y = pow(rhs, (_SECP256K1_P + 1) // 4, _SECP256K1_P)
+    if y * y % _SECP256K1_P != rhs:
+        raise ValueError("recovery x is not on secp256k1")
+    if (y & 1) != (recid & 1):
+        y = _SECP256K1_P - y
+    e = int.from_bytes(_need(digest32, 32, "digest"), "big") % _SECP256K1_N
+    r_inv = pow(r, -1, _SECP256K1_N)
+    sR = _k1_mul((x, y), s)
+    eG = _k1_mul(_SECP256K1_G, e)
+    neg_eG = None if eG is None else (eG[0], _SECP256K1_P - eG[1])
+    Q = _k1_mul(_k1_add(sR, neg_eG), r_inv)
+    if Q is None:
+        raise ValueError("recovered key is the point at infinity")
+    return secp256k1_compress(Q)
+
+def bitcoin_message_digest(msg):
+    """digest = SHA256(SHA256(0x18 ‖ "Bitcoin Signed Message:\\n" ‖
+    varint(len(msg)) ‖ msg)) - varint is the Bitcoin CompactSize encoding
+    (shared with the §4.2 tx parser). ECDSA verifies THIS digest directly."""
+    return sha256d(BITCOIN_MSG_PREFIX + _enc_varint(len(msg)) + msg)
+
+def wallet_issuance_message(m):
+    return WALLET_MSG_ISSUANCE + _need(m, 32, "m").hex().encode("ascii")
+
+def wallet_cosign_message(m_i):
+    return WALLET_MSG_COSIGN + _need(m_i, 32, "m_i").hex().encode("ascii")
+
+def wallet_registration_message(challenge):
+    return WALLET_MSG_REGISTRATION + _need(challenge, 32, "challenge").hex().encode("ascii")
+
+# ----- 0x10 multi-signature envelope (bundle §12.2 / plan appendix C.2) -----
+class MultisigError(ValueError):
+    """Parse/verify refusal with a stable machine identifier in `.error` (the
+    identifiers match the engine KAT's negative_v2 `error` field)."""
+    def __init__(self, error, detail=""):
+        super().__init__("%s%s" % (error, (": " + detail) if detail else ""))
+        self.error = error
+
+def parse_inner_sig(inner):
+    """Parse ONE inner signature frame of a 0x10 entry. Deliberately a separate
+    function from parse_multisig_s: 0x10 nesting is refused HERE, so the
+    envelope parser structurally cannot recurse. The frame must consume
+    inner_len exactly - leftover bytes inside the inner are refused."""
+    inner = bytes(inner)
+    if not inner:
+        raise MultisigError("truncated", "empty inner_sig")
+    alg = inner[0]
+    if alg == ALG_MULTISIG:
+        raise MultisigError("nested_multisig", "0x10 inside 0x10")
+    if alg == ALG_WALLET_SECP256K1:
+        if len(inner) != 65:
+            raise MultisigError("wallet_sig_length", "0x04 inner must be exactly 65 B, got %d" % len(inner))
+        return {"alg": alg, "rs": inner[1:],
+                "r": int.from_bytes(inner[1:33], "big"), "s": int.from_bytes(inner[33:65], "big")}
+    if alg not in (ALG_WEBAUTHN_ES256, ALG_ES256_PLAIN):
+        raise MultisigError("unknown_inner_alg", "inner alg 0x%02x" % alg)
+    o = 1
+    def take(n, what):
+        nonlocal o
+        if len(inner) - o < n:
+            raise MultisigError("truncated", "inner %s" % what)
+        piece = inner[o:o + n]; o += n
+        return piece
+    out = {"alg": alg}
+    if alg == ALG_WEBAUTHN_ES256:
+        ad_len = int.from_bytes(take(2, "len16(authenticator_data)"), "big")
+        out["authenticator_data"] = take(ad_len, "authenticator_data")
+        cdj_len = int.from_bytes(take(4, "len32(client_data_json)"), "big")
+        out["client_data_json"] = take(cdj_len, "client_data_json")
+    der_len = int.from_bytes(take(2, "len16(signature_der)"), "big")
+    out["signature_der"] = take(der_len, "signature_der")
+    if o != len(inner):
+        raise MultisigError("inner_trailing", "%d byte(s) after the inner frame" % (len(inner) - o))
+    return out
+
+def parse_multisig_s(s):
+    """Strict parser for s = 0x10 ‖ count(1) ‖ [role_len(1) ‖ role ‖ key_id(32)
+    ‖ inner_len(2 BE) ‖ inner]×count. The receiver NEVER re-sorts: the first
+    violation refuses the whole envelope (appendix C.2 rules 1-8). Returns the
+    entry list in wire order."""
+    s = bytes(s)
+    if len(s) > MULTISIG_MAX_LEN:
+        raise MultisigError("too_long", "s is %d B, cap %d" % (len(s), MULTISIG_MAX_LEN))
+    if len(s) < 2 or s[0] != ALG_MULTISIG:
+        raise MultisigError("not_multisig", "s[0] must be 0x10")
+    count = s[1]
+    if not (MULTISIG_MIN_COUNT <= count <= MULTISIG_MAX_COUNT):
+        raise MultisigError("count_out_of_range", "count %d not in 2..=8 (a single signature uses 0x01/0x02/0x04)" % count)
+    o = 2
+    def take(n, what):
+        nonlocal o
+        if len(s) - o < n:
+            raise MultisigError("truncated", what)
+        piece = s[o:o + n]; o += n
+        return piece
+    entries, seen, prev = [], set(), None
+    for i in range(count):
+        role_len = take(1, "role_len")[0]
+        if not (1 <= role_len <= 32):
+            raise MultisigError("bad_role_len", "entry %d role_len %d" % (i, role_len))
+        role_b = take(role_len, "role")
+        try:
+            role = role_b.decode("utf-8")
+        except UnicodeDecodeError:
+            raise MultisigError("unknown_role", "entry %d role is not UTF-8" % i)
+        if role not in ROLE_ORD:
+            raise MultisigError("unknown_role", "entry %d role %r not in the closed vocabulary" % (i, role))
+        kid = take(32, "key_id")
+        inner_len = int.from_bytes(take(2, "inner_len"), "big")
+        inner = take(inner_len, "inner_sig")
+        parsed = parse_inner_sig(inner)
+        if kid in seen:
+            raise MultisigError("duplicate_key_id", "entry %d key_id repeats" % i)
+        key = (ROLE_ORD[role], kid)
+        if prev is not None and key <= prev:
+            raise MultisigError("out_of_order", "entry %d violates strict (role_ord, key_id) ascending order" % i)
+        seen.add(kid); prev = key
+        entry = {"role": role, "role_ord": ROLE_ORD[role], "key_id": kid, "inner": bytes(inner)}
+        entry.update(parsed)
+        entries.append(entry)
+    if o != len(s):
+        raise MultisigError("trailing", "%d trailing byte(s) after entry %d" % (len(s) - o, count))
+    if not any(e["role"] == "issuer" for e in entries):
+        raise MultisigError("no_issuer", "at least one issuer entry is required")
+    return entries
+
+def assemble_multisig_s(entries):
+    """Reassemble s from (role, key_id, inner_sig) triples IN THE GIVEN ORDER.
+    The verifier never sorts - a bundle whose signers[] are mis-ordered
+    reassembles to an s that parse_multisig_s refuses, which is the intent."""
+    if not (1 <= len(entries) <= 255):
+        raise ValueError("entry count out of range")
+    out = [bytes([ALG_MULTISIG, len(entries)])]
+    for role, kid, inner in entries:
+        role_b = role.encode("utf-8")
+        if not (1 <= len(role_b) <= 32):
+            raise ValueError("role must be 1..32 UTF-8 bytes")
+        if len(inner) > 0xffff:
+            raise ValueError("inner_sig longer than a len16 can carry")
+        out.append(bytes([len(role_b)]) + role_b + _need(kid, 32, "key_id")
+                   + len(inner).to_bytes(2, "big") + bytes(inner))
+    return b"".join(out)
+
+def verify_multisig_entry(entry, pub33, m, rp_id=None, origins=None):
+    """Verify ONE parsed 0x10 entry. m_i is recomputed HERE from the PARSED role
+    (never from a side channel), so a re-labelled entry fails with
+    challenge_mismatch even though its bytes parse. Returns (ok, error, reasons);
+    `error` uses the engine KAT identifiers."""
+    m_i = cosign_message(m, entry["role"])
+    alg = entry["alg"]
+    if alg == ALG_WEBAUTHN_ES256:
+        ok, reasons, _facts = webauthn_verify_assertion(
+            pub33, entry["authenticator_data"], entry["client_data_json"],
+            entry["signature_der"], m_i, rp_id, origins)
+        if ok:
+            return True, None, []
+        err = "challenge_mismatch" if any("challenge" in r for r in reasons) else "bad_signature"
+        return False, err, reasons
+    if alg == ALG_ES256_PLAIN:
+        try:
+            ok = p256_verify(pub33, m_i, entry["signature_der"])
+        except ValueError as e:
+            return False, "bad_signature", [str(e)]
+        return (True, None, []) if ok else (False, "bad_signature", ["ES256 over m_i does not verify"])
+    if alg == ALG_WALLET_SECP256K1:
+        if not secp256k1_is_low_s(entry["s"]):
+            return False, "non_low_s", ["s > n/2 - low-s is enforced for 0x04 (normalisation is ingestion's job)"]
+        digest = bitcoin_message_digest(wallet_cosign_message(m_i))
+        try:
+            ok = secp256k1_verify_digest(pub33, digest, entry["r"], entry["s"])
+        except ValueError as e:
+            return False, "bad_signature", [str(e)]
+        return (True, None, []) if ok else (False, "bad_signature", ["secp256k1 ECDSA over the cosign digest does not verify"])
+    return False, "unknown_inner_alg", ["alg 0x%02x" % alg]
+
+# ----- tier 3 inscription (docs/inscription-tier-spec-2026-09-02.md, MUST 14-26) -----
+# The envelope carries R (143 B) || s, so the reveal witness holds the record AND
+# the issuer signature bytes. Nothing here replaces MUST 1-13: it is applied on
+# top of a bundle that already passed them.
+#
+# The parser below is deliberately NOT parse_envelope() (the v1-v3 unified-witness
+# reader above). That one is lenient by design - it merges duplicate envelopes,
+# truncates the body at a nested OP_IF and accepts a truncated push - which is
+# exactly what MUST 19/20 forbid. The legacy path keeps it; tier 3 gets this one.
+ENVELOPE_TAG_V1 = b"BC30/envelope/v1"                    # 16 B domain tag (spec 2.3)
+INSC_PROTOCOL_TAG = b"bcrt"                              # spec 2.1, enforced by equality
+INSC_CONTENT_TYPE = b"application/vnd.bitcert.sig.v1"    # spec 2.1, enforced by equality
+INSC_MAX_PUSH = 520                                      # every chunk but the last is EXACTLY this
+INSC_BODY_MAX = RECORD_LEN + 8192                        # 8335 - the reassembly cap (MUST 19)
+INSC_FIELDS = ("reveal_txid", "input_index", "witness_item_index")   # spec 4: exactly these three
+# spec 4: unknown keys under `anchor` are refused as well, or a security field
+# could hide there and an older verifier would ignore it in silence. v4 keeps its
+# frozen behaviour; this whitelist is applied to v5 only.
+ANCHOR_FIELDS_V5 = ("reveal_txid", "commit_txid", "reveal_tx_hex",
+                    "op_return_payload_hex", "confirmed")
+TAPROOT_ANNEX_PREFIX = 0x50
+TAPROOT_MAX_MERKLE_DEPTH = 128
+
+class EnvelopeError(ValueError):
+    """Refusal with a stable machine identifier in `.error`. The identifiers are
+    the engine KAT's inscription.negative[].error strings - the contract the
+    three implementations are compared on."""
+    def __init__(self, error, detail=""):
+        super().__init__("%s%s" % (error, (": " + detail) if detail else ""))
+        self.error = error
+
+def secp256k1_lift_x(x32):
+    """BIP-340 lift_x: a 32-byte x-only key is a point only if x < p and x is on
+    the curve. MUST 20 needs this - a leaf whose key is not a point can never be
+    satisfied, and the script cannot be deterministically rebuilt from it."""
+    if len(x32) != 32:
+        raise ValueError("x-only key must be 32 bytes")
+    x = int.from_bytes(x32, "big")
+    if x >= _SECP256K1_P:
+        raise ValueError("x is not a canonical field element")
+    rhs = (x * x * x + _SECP256K1_B) % _SECP256K1_P
+    y = pow(rhs, (_SECP256K1_P + 1) // 4, _SECP256K1_P)          # p = 3 (mod 4)
+    if y * y % _SECP256K1_P != rhs:
+        raise ValueError("x is not on secp256k1")
+    return (x, y if y % 2 == 0 else _SECP256K1_P - y)            # BIP-340: even y
+
+def insc_push(data):
+    """The SHORTEST push that can carry this length (MUST 19). Not BIP-62
+    MINIMALDATA: that rule would demand OP_1..OP_16 for the single bytes
+    0x01..0x10, and those are opcodes, not pushes - inside an envelope they are
+    refused as forbidden_opcode. The two readings refuse the same scripts."""
+    n = len(data)
+    if n == 0 or n > INSC_MAX_PUSH:
+        raise EnvelopeError("non_canonical_chunking", "push of %d bytes (1..%d)" % (n, INSC_MAX_PUSH))
+    if n < 0x4c:
+        return bytes([n]) + data
+    if n <= 0xff:
+        return b"\x4c" + bytes([n]) + data
+    return b"\x4d" + n.to_bytes(2, "little") + data
+
+def build_inscription_script(script_key, tag, content_type, body):
+    """spec 2.1, byte for byte:
+        <script_key(32 B x-only)> OP_CHECKSIG
+        OP_FALSE OP_IF <protocol_tag> <content_type> <body chunk…> OP_ENDIF
+    Every chunk but the last is exactly 520 B, so one body has exactly one
+    encoding. This is also MUST 20's reference serialisation."""
+    if len(script_key) != 32:
+        raise EnvelopeError("invalid_script_key", "script key must be 32 bytes")
+    s = insc_push(script_key) + b"\xac" + b"\x00\x63"
+    s += insc_push(tag) + insc_push(content_type)
+    for i in range(0, len(body), INSC_MAX_PUSH):
+        s += insc_push(body[i:i + INSC_MAX_PUSH])
+    return s + b"\x68"
+
+def parse_inscription_envelope(script):
+    """MUST 19 + MUST 20. Returns {script_key, protocol_tag, content_type, body,
+    chunk_lens} or raises EnvelopeError.
+
+    Only `not_an_envelope` means "nothing was claimed" (the fixed prefix is
+    absent); every other identifier is a refusal of something that DID claim to
+    be a tier 3 envelope."""
+    script = bytes(script)
+    # The fixed prefix IS the claim: <32 B push> OP_CHECKSIG OP_FALSE OP_IF.
+    if (len(script) < 37 or script[0] != 0x20 or script[33] != 0xac
+            or script[34] != 0x00 or script[35] != 0x63):
+        raise EnvelopeError("not_an_envelope",
+                            "script does not open with <32 B key> OP_CHECKSIG OP_FALSE OP_IF")
+    script_key = script[1:33]
+    o, n, pushes, closed = 36, len(script), [], False
+    while o < n:
+        op = script[o]; o += 1
+        if op == 0x68:                                   # OP_ENDIF
+            closed = True
+            break
+        if op in (0x63, 0x64):                           # OP_IF / OP_NOTIF
+            raise EnvelopeError("nested_conditional", "0x%02x inside the envelope" % op)
+        if op == 0x00:                                   # OP_0 is an opcode, not a push
+            raise EnvelopeError("forbidden_opcode", "OP_0 inside the envelope")
+        if op < 0x4c:
+            ln = op
+        elif op == 0x4c:                                 # OP_PUSHDATA1
+            if n - o < 1:
+                raise EnvelopeError("truncated_push", "OP_PUSHDATA1 length byte past the script")
+            ln = script[o]; o += 1
+            if ln < 0x4c:
+                raise EnvelopeError("non_minimal_push", "%d bytes pushed with OP_PUSHDATA1" % ln)
+        elif op == 0x4d:                                 # OP_PUSHDATA2
+            if n - o < 2:
+                raise EnvelopeError("truncated_push", "OP_PUSHDATA2 length past the script")
+            ln = int.from_bytes(script[o:o + 2], "little"); o += 2
+            if ln <= 0xff:
+                raise EnvelopeError("non_minimal_push", "%d bytes pushed with OP_PUSHDATA2" % ln)
+        elif op == 0x4e:                                 # OP_PUSHDATA4 - never minimal here
+            raise EnvelopeError("non_minimal_push", "OP_PUSHDATA4 cannot be the shortest form")
+        else:
+            raise EnvelopeError("forbidden_opcode", "opcode 0x%02x inside the envelope" % op)
+        if ln > INSC_MAX_PUSH:
+            raise EnvelopeError("non_canonical_chunking", "push of %d bytes exceeds %d" % (ln, INSC_MAX_PUSH))
+        if n - o < ln:
+            raise EnvelopeError("truncated_push", "push of %d bytes runs past the script" % ln)
+        pushes.append(script[o:o + ln]); o += ln
+    if not closed:
+        raise EnvelopeError("unterminated_envelope", "no OP_ENDIF")
+    if o != n:
+        raise EnvelopeError("trailing_bytes_after_endif", "%d byte(s) after OP_ENDIF" % (n - o))
+    if len(pushes) < 3:
+        raise EnvelopeError("empty_body", "envelope carries no body chunk")
+    tag, content_type, chunks = pushes[0], pushes[1], pushes[2:]
+    for c in chunks[:-1]:
+        if len(c) != INSC_MAX_PUSH:
+            raise EnvelopeError("non_canonical_chunking",
+                                "chunk of %d bytes before the last one (must be %d)" % (len(c), INSC_MAX_PUSH))
+    body = b"".join(chunks)
+    if not body:
+        raise EnvelopeError("empty_body", "body is zero bytes")
+    if len(body) > INSC_BODY_MAX:
+        raise EnvelopeError("body_too_large", "body is %d bytes, cap %d" % (len(body), INSC_BODY_MAX))
+    try:
+        secp256k1_lift_x(script_key)
+    except ValueError as e:
+        raise EnvelopeError("invalid_script_key", str(e))
+    # MUST 20 - the one line that closes every parser difference: rebuild the
+    # WHOLE script (the key push and OP_CHECKSIG included) from what we recovered
+    # and demand byte identity. Anything the walk above let through but cannot be
+    # re-emitted is refused here.
+    if build_inscription_script(script_key, tag, content_type, body) != script:
+        raise EnvelopeError("reserialization_mismatch", "the recovered fields do not re-serialise to this script")
+    return {"script_key": script_key, "protocol_tag": tag, "content_type": content_type,
+            "body": body, "chunk_lens": [len(c) for c in chunks]}
+
+def inscription_witness_script(items, index):
+    """MUST 18. Read ONLY the indexed stack item - no scanning for an envelope
+    elsewhere - after the stack itself is judged: 2+ items, a well-formed control
+    block last, no annex."""
+    if items is None:
+        raise EnvelopeError("no_witness", "this input carries no witness")
+    if len(items) >= 2 and items[-1][:1] == bytes([TAPROOT_ANNEX_PREFIX]):
+        raise EnvelopeError("annex_present", "last stack item starts with 0x50")
+    if len(items) < 2:
+        raise EnvelopeError("witness_too_short", "script-path spend needs [script, control block]")
+    cb = items[-1]
+    if (len(cb) < 33 or (len(cb) - 33) % 32 != 0
+            or (len(cb) - 33) // 32 > TAPROOT_MAX_MERKLE_DEPTH or (cb[0] & 0xfe) != 0xc0):
+        raise EnvelopeError("malformed_control_block",
+                            "control block is 0xc0/0xc1 followed by 32k bytes, got %d bytes" % len(cb))
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0 or index >= len(items) - 1:
+        raise EnvelopeError("witness_index_out_of_range",
+                            "witness_item_index %r is not a script item of a %d-item stack" % (index, len(items)))
+    return items[index]
+
+def envelope_root_v1(tag, content_type, body):
+    """spec 2.3 - the ONLY preimage. The length prefixes are what stop
+    (tag, ct, body) from being re-cut into a different triple with the same
+    bytes; tag and content_type are inside so they are committed, not free text."""
+    return sha256(ENVELOPE_TAG_V1
+                  + len(tag).to_bytes(2, "big") + tag
+                  + len(content_type).to_bytes(2, "big") + content_type
+                  + len(body).to_bytes(4, "big") + body)
+
+def _inscription_schema_problems(ins):
+    """spec 4 - exactly three fields, whitelisted. protocol_tag/content_type are
+    NOT among them: they are recovered from the witness, never taken from JSON."""
+    if not isinstance(ins, dict):
+        return ["`inscription` must be an object"]
+    p = []
+    for k in ins:
+        if k not in INSC_FIELDS:
+            p.append("inscription.%s is not an allowed field (exactly: %s)" % (k, ", ".join(INSC_FIELDS)))
+    try:
+        _hexb(ins.get("reveal_txid"), 32, "inscription.reveal_txid")
+    except ValueError as e:
+        p.append(str(e))
+    for k in ("input_index", "witness_item_index"):
+        v = ins.get(k)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            p.append("inscription.%s must be a non-negative integer" % k)
+    return p
+
+def inscription_equivalence_error(flags, envelope_root_hex, has_inscription):
+    """spec 3 + 4 (MUST 15/16): flags 0b11 is ③'s ONLY discriminator, and the
+    three claims stand or fall together
+
+        flags bit0 = 1  <->  aux.envelope_root != SHA256("BC30/envelope/none")
+                        <->  `inscription` present
+
+    Returns (error_id, detail) or (None, None). Pure, so the same decision is
+    pinned directly by the engine KAT's anchor-stage negatives."""
+    none_root = envelope_root_none().hex()
+    has_env = str(envelope_root_hex or "").lower() != none_root
+    if flags is None:
+        return "flags_unavailable", "no 86-byte payload to read flags from"
+    if not flags & FLAG_IDENTITY_BOUND:
+        return ("flags_not_identity_bound",
+                "flags 0b%s: the legacy unified-witness path never sets bit 1, so 0b11 stays the sole discriminator"
+                % format(flags, "02b"))
+    if flags & FLAG_WITNESS_PRESENT:
+        if not has_env:
+            return "flags_envelope_root_mismatch", "WITNESS_PRESENT is set but aux.envelope_root is the envelope-none constant"
+        if not has_inscription:
+            return "inscription_missing", "WITNESS_PRESENT is set but the bundle carries no `inscription` section"
+        return None, None
+    if has_env:
+        return "flags_envelope_root_mismatch", "aux.envelope_root is not the constant but WITNESS_PRESENT (bit 0) is clear"
+    if has_inscription:
+        return "inscription_unexpected", "`inscription` is present but WITNESS_PRESENT (bit 0) is clear"
+    return None, None
+
+def inscription_batch_error(merkle, leaf_bytes):
+    """MUST 25 - ③ is always a one-leaf batch: an empty path, and the root IS
+    H_leaf(leaf_bytes). Returns an error id or None."""
+    try:
+        want = leaf_hash(bytes.fromhex(leaf_bytes)).hex()
+    except Exception:
+        return "not_single_leaf_batch"
+    if (merkle.get("siblings") != [] or merkle.get("directions") != []
+            or str(merkle.get("root", "")).lower() != want):
+        return "not_single_leaf_batch"
+    return None
+
+def _inscription_claimed(bundle, decoded):
+    """spec 4 three-way equivalence: bit0 = 1 <-> aux.envelope_root != the
+    constant <-> `inscription` present. If ANY of the three is set the bundle
+    claims tier 3 and MUST 14-26 run (and refuse the ones that disagree)."""
+    if "inscription" in bundle:
+        return True
+    try:
+        if str(bundle["aux"].get("envelope_root", "")).lower() != envelope_root_none().hex():
+            return True
+    except Exception:
+        pass
+    return bool(decoded and decoded.get("format") == "BC30"
+                and decoded.get("flags", 0) & FLAG_WITNESS_PRESENT)
+
+def fetch_reveal_tx_hex(base, txid):
+    """MUST 26's fetch: the raw transaction WITH its witness, from the Bitcoin
+    source the user chose (never BitCert). esplora/mempool serve it at
+    /api/tx/<txid>/hex."""
+    import urllib.request
+    url = base.rstrip("/") + "/api/tx/" + txid + "/hex"
+    with urllib.request.urlopen(url, timeout=15) as r:
+        return r.read().decode("ascii").strip()
+
+def _inscription_steps(R, bundle, decoded, base, Rb, s_bytes, explorer=None):
+    """MUST 14-26 as numbered steps appended after the record pipeline, plus the
+    `publication` axis (spec 5.1). MUST 14 lives in step 0 (the schema gate); the
+    record grade from MUST 1-13 is untouched by everything here.
+
+    Wording rule (spec 5.1): an offline verdict never says the envelope is on
+    Bitcoin. The strongest offline claim is that the issuer signature bytes are
+    committed as the anchor's aux."""
+    anchor, aux, rec = bundle["anchor"], bundle["aux"], bundle["record"]
+    ins = bundle.get("inscription")
+    R.axes["publication"] = "refused"
+    n = base
+
+    # 15 + 16 + 17 - the discriminator: flags 0b11, all three claims agreeing, one tx
+    flags = decoded.get("flags") if (decoded and decoded.get("format") == "BC30") else None
+    env_root_hex = str(aux.get("envelope_root", "")).lower()
+    err, detail = inscription_equivalence_error(flags, env_root_hex, ins is not None)
+    if err is None and ins is None:
+        err, detail = "inscription_missing", "the bundle claims ③ but carries no `inscription` section"
+    if err is None and str(ins.get("reveal_txid", "")).lower() != str(anchor.get("reveal_txid", "")).lower():
+        err, detail = "reveal_txid_mismatch", ("inscription.reveal_txid %s != anchor.reveal_txid %s - the envelope and the "
+                                               "86-byte payload must be in the SAME transaction"
+                                               % (ins.get("reveal_txid"), anchor.get("reveal_txid")))
+    if err is not None:
+        R.step(n, "ins_anchor", "bad", "%d · Inscription (③) - the claim is not consistent ✗ (%s)" % (n, err), detail)
+    else:
+        R.step(n, "ins_anchor", "ok", "%d · Inscription (③) - flags 0b11, aux.envelope_root and `inscription` all agree ✓" % n,
+               "reveal_txid %s · input %d · witness item %d\nenvelope_root committed in aux: %s"
+               % (ins["reveal_txid"], ins["input_index"], ins["witness_item_index"], env_root_hex))
+    n += 1
+
+    # 18 + 19 + 20 - recover the envelope from the indexed witness item, strictly
+    env = None
+    raw = anchor.get("reveal_tx_hex")
+    if err is not None:
+        R.step(n, "ins_envelope", "bad", "%d · Envelope - not read (the ③ claim above is refused)" % n)
+    elif not raw:
+        R.step(n, "ins_envelope", "undet", "%d · Envelope - no reveal_tx_hex in the bundle (reveal_tx_missing)" % n,
+               "the witness is read from the bundle's raw transaction; without it the envelope cannot be seen")
+    else:
+        try:
+            items = extract_witness_items(raw, ins["input_index"])
+            script = inscription_witness_script(items, ins["witness_item_index"])
+            env = parse_inscription_envelope(script)
+            R.step(n, "ins_envelope", "ok", "%d · Envelope - strict parse and re-serialisation are byte-identical ✓" % n,
+                   "script %d B · body %d B · chunks %s\nscript_key %s"
+                   % (len(script), len(env["body"]), env["chunk_lens"], env["script_key"].hex()))
+        except EnvelopeError as e:
+            R.step(n, "ins_envelope", "bad", "%d · Envelope - REFUSED ✗ (%s)" % (n, e.error), str(e))
+        except Exception as e:
+            R.step(n, "ins_envelope", "bad", "%d · Envelope - error" % n, str(e))
+    n += 1
+
+    # 21 + 22 + 23 - tag, content type, R and s bound to the bundle's own bytes
+    if env is None:
+        R.step(n, "ins_binding", "undet" if (err is None and not raw) else "bad",
+               "%d · Envelope binding - not checked (no envelope was recovered)" % n)
+    elif Rb is None or s_bytes is None:
+        R.step(n, "ins_binding", "bad", "%d · Envelope binding - record or signature bytes unavailable ✗" % n,
+               "steps above could not rebuild R or s")
+    else:
+        body = env["body"]
+        probs = []
+        if env["protocol_tag"] != INSC_PROTOCOL_TAG:
+            probs.append("protocol_tag_mismatch: %s" % env["protocol_tag"].hex())
+        if env["content_type"] != INSC_CONTENT_TYPE:
+            probs.append("content_type_mismatch: %s" % env["content_type"].hex())
+        if body[:RECORD_LEN] != Rb:
+            probs.append("record_mismatch: body[0..143] is not this bundle's R")
+        if body[RECORD_LEN:] != s_bytes:
+            probs.append("signature_mismatch: body[143..] is not this bundle's s")
+        R.step(n, "ins_binding", "ok" if not probs else "bad",
+               "%d · Envelope binding - body is this record's R ‖ s %s" % (n, "✓" if not probs else "✗"),
+               ("protocol_tag %s · content_type %s\nR %d B ‖ s %d B = %d B"
+                % (env["protocol_tag"].hex(), env["content_type"].hex(), RECORD_LEN, len(body) - RECORD_LEN, len(body)))
+               if not probs else "\n".join("· " + x for x in probs))
+        if probs:
+            env = None
+    n += 1
+
+    # 24 - envelope_root recomputed from the preimage, and the aux fold on-chain
+    if env is None:
+        R.step(n, "ins_commit", "undet" if (err is None and not raw) else "bad",
+               "%d · Envelope commitment - not checked (no envelope bound)" % n,
+               "aux.envelope_root: %s" % env_root_hex)
+    else:
+        try:
+            got = envelope_root_v1(env["protocol_tag"], env["content_type"], env["body"])
+            root_ok = got.hex() == env_root_hex
+            fold = aux_commitment(bytes.fromhex(aux["tl_root"]), bytes.fromhex(aux["sl_root"]), got)
+            fold_ok = bool(decoded) and fold.hex() == str(decoded.get("aux", "")).lower()
+            R.step(n, "ins_commit", "ok" if root_ok and fold_ok else "bad",
+                   "%d · Envelope commitment - the issuer signature bytes are committed as the anchor's aux %s"
+                   % (n, "✓" if root_ok and fold_ok else "✗"),
+                   "recomputed envelope_root: %s\naux.envelope_root:        %s\naux fold: %s\npayload bytes 54..86: %s"
+                   % (got.hex(), env_root_hex, fold.hex(), decoded.get("aux") if decoded else "(none)"))
+        except Exception as e:
+            R.step(n, "ins_commit", "bad", "%d · Envelope commitment - error" % n, str(e))
+    n += 1
+
+    # 25 - one leaf, no path: a zero-length proof cannot claim a different leaf
+    m = bundle["merkle"]
+    try:
+        berr = inscription_batch_error(m, rec["leaf_bytes"])
+        want = leaf_hash(bytes.fromhex(rec["leaf_bytes"])).hex()
+        R.step(n, "ins_batch", "ok" if berr is None else "bad",
+               "%d · Single-leaf batch - ③ anchors one record %s" % (n, "✓" if berr is None else "✗ (%s)" % berr),
+               "root %s\nSHA256(0x00 ‖ leaf_bytes) %s\nsiblings %d · directions %d"
+               % (m.get("root"), want, len(m.get("siblings") or []), len(m.get("directions") or [])))
+    except Exception as e:
+        R.step(n, "ins_batch", "bad", "%d · Single-leaf batch - error" % n, str(e))
+    n += 1
+
+    # 26 - the ONLY step that can say the envelope is published (spec 5.1)
+    refused = any(s["state"] == "bad" for s in R.steps if s["key"].startswith("ins_"))
+    if not raw:
+        R.step(n, "ins_publication", "undet", "%d · Publication - UNDETERMINED, this bundle carries no reveal transaction" % n,
+               "publication: committed. The anchor's aux commits an envelope_root, but the envelope bytes are not here to compare.")
+        if not refused:
+            R.axes["publication"] = "committed"
+    elif not explorer:
+        R.step(n, "ins_publication", "undet", "%d · Publication - UNDETERMINED, no Bitcoin source was consulted" % n,
+               "publication: committed. The issuer signature bytes are committed as the anchor's aux; that the reveal was\n"
+               "PUBLISHED is a separate fact - pass --explorer <url> (any Bitcoin source, never BitCert) to compare the\n"
+               "witness-bearing transaction with this bundle's reveal_tx_hex.")
+        if not refused:
+            R.axes["publication"] = "committed"
+    else:
+        try:
+            got = fetch_reveal_tx_hex(explorer, str(anchor.get("reveal_txid") or ""))
+            same = got.lower() == str(raw).lower()
+            wit = None
+            try:
+                wit = extract_witness_items(got, int(ins["input_index"]))
+            except Exception:
+                wit = None
+            if same:
+                R.step(n, "ins_publication", "ok", "%d · Publication - the reveal transaction on Bitcoin is byte-identical to this bundle's ✓" % n,
+                       "source: %s\n%d bytes compared, witness included" % (explorer, len(got) // 2))
+                if not refused:
+                    R.axes["publication"] = "published"
+            elif not wit:
+                R.step(n, "ins_publication", "undet", "%d · Publication - UNDETERMINED, this source returned no witness data" % n,
+                       "source: %s\npublication stays `committed` - ask a source that serves the raw transaction with its witness" % explorer)
+                if not refused:
+                    R.axes["publication"] = "committed"
+            else:
+                R.step(n, "ins_publication", "bad", "%d · Publication - the transaction on Bitcoin is NOT this bundle's reveal ✗" % n,
+                       "source: %s\nthe witness served for this txid differs from reveal_tx_hex, so the envelope in this bundle\n"
+                       "is not the one that was published" % explorer)
+        except Exception as e:
+            R.step(n, "ins_publication", "undet", "%d · Publication - UNDETERMINED, could not reach the Bitcoin source" % n,
+                   "%s\npublication stays `committed`; MUST 14-25 above are already proven offline" % e)
+            if not refused:
+                R.axes["publication"] = "committed"
+    return R
+
+# ----- policy grammar gate (bundle §12.1 / plan appendix B) -----
+# policy_jcs/policy_hash above stay untouched: Python's sort_keys is code-point
+# order while RFC 8785 wants UTF-16 code units, but the two only diverge outside
+# the BMP and the key grammar below is ASCII-closed - the risk is extinguished
+# at the grammar, not papered over in the sort.
+POLICY_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+POLICY_REQUIRED_KEYS = ("document_type", "jurisdiction")
+POLICY_MAX_PAIRS = 16
+POLICY_MAX_VALUE_BYTES = 256
+POLICY_MAX_JCS_BYTES = 2048
+
+class PolicyError(ValueError):
+    """Grammar refusal with a stable machine identifier in `.error` (matches the
+    engine KAT's negative_v2 `error` field)."""
+    def __init__(self, error, detail=""):
+        super().__init__("%s%s" % (error, (": " + detail) if detail else ""))
+        self.error = error
+
+def _policy_char_forbidden(cp):
+    # Cc (C0 + DEL + C1) and the bidirectional control characters.
+    return (cp < 0x20 or cp == 0x7F or 0x80 <= cp <= 0x9F
+            or 0x202A <= cp <= 0x202E or 0x2066 <= cp <= 0x2069)
+
+def policy_validate(pairs):
+    """Appendix-B grammar gate over the SUBMITTED pairs (a list of [key, value]
+    in submission order - duplicates are only visible before the dict collapse;
+    a dict is accepted for pre-collapsed input). Raises PolicyError on the first
+    violation; returns the validated policy dict (JCS/hash unchanged elsewhere)."""
+    items = list(pairs.items()) if isinstance(pairs, dict) else [(k, v) for k, v in pairs]
+    if len(items) > POLICY_MAX_PAIRS:
+        raise PolicyError("too_many_pairs", "%d pairs, cap %d" % (len(items), POLICY_MAX_PAIRS))
+    seen = set()
+    for k, v in items:
+        if not isinstance(k, str) or not POLICY_KEY_RE.match(k):
+            raise PolicyError("invalid_key", repr(k))
+        if k in seen:
+            raise PolicyError("duplicate_key", k)          # silent overwrite is refusal, not merging
+        seen.add(k)
+        if not isinstance(v, str):
+            raise PolicyError("invalid_value", "value of %r is not a string" % k)
+        for ch in v:
+            if _policy_char_forbidden(ord(ch)):
+                raise PolicyError("forbidden_char", "U+%04X in the value of %r" % (ord(ch), k))
+        if len(v.encode("utf-8")) > POLICY_MAX_VALUE_BYTES:
+            raise PolicyError("value_too_long", "value of %r is %d B, cap %d" % (k, len(v.encode("utf-8")), POLICY_MAX_VALUE_BYTES))
+    for k in POLICY_REQUIRED_KEYS:
+        if k not in seen:
+            raise PolicyError("missing_required_key", k)
+    policy = dict(items)
+    if len(policy_jcs(policy)) > POLICY_MAX_JCS_BYTES:
+        raise PolicyError("jcs_too_long", "JCS is %d B, cap %d" % (len(policy_jcs(policy)), POLICY_MAX_JCS_BYTES))
+    return policy
+
+# ----- bundle v5 multi-signature pipeline (schema §12.4-§12.8) -----
+V5_SIGNER_FIELDS = ("role", "alg", "curve_id", "public_key", "key_id", "rp_id", "assertion", "tl_entry", "tl_proof")
+V5_ASSERTION_FIELDS = {"webauthn-es256": ("authenticator_data", "client_data_json", "signature_der"),
+                       "es256-plain": ("signature_der",), "wallet-secp256k1": ("signature_rs",)}
+
+def _v5_multi_schema_problems(b):
+    """Shape gate for a signers[] bundle: §12.4 whitelist, the tl pair rule and
+    alg↔curve (MUST 2+3), one canonical envelope (§12.8). Early and NAMED so a
+    violation does not surface later as a bare root mismatch."""
+    p = []
+    for k in ("record", "merkle", "anchor", "aux"):
+        if not isinstance(b.get(k), dict): p.append("missing section %r" % k)
+    if not isinstance(b.get("signers"), list): p.append("signers must be an array")
+    if p: return p
+    if b.get("issuer") is not None:
+        p.append("signers[] and an issuer section are mutually exclusive - one canonical envelope (§12.8)")
+    known = ("schema", "bitcoin_network", "generated_at", "record", "merkle", "anchor", "signers", "subject", "aux", "presentation", "chain", "inscription")
+    for k in b:
+        if k not in known and k != "issuer":
+            p.append("unknown top-level key `%s` (a v5 multi-signature bundle carries only: %s)" % (k, ", ".join(known)))
+    if "inscription" in b: p += _inscription_schema_problems(b["inscription"])
+    for k in b["anchor"]:
+        if k not in ANCHOR_FIELDS_V5 and k != "witness_envelope":
+            p.append("anchor.%s is not an allowed field (a security field must not be able to hide under `anchor`)" % k)
+    if b.get("reconciliation") is not None: p.append("v5 does not allow `reconciliation`")
+    if b["anchor"].get("witness_envelope") is not None: p.append("v5 does not allow `witness_envelope`")
+    rec, pre = b["record"], b["record"].get("preimage")
+    if rec.get("kind") != "issuance": p.append("record.kind must be \"issuance\"")
+    if not isinstance(pre, dict): return p + ["record.preimage missing"]
+    if pre.get("scheme") != "bc30-leaf-v2": p.append("preimage.scheme must be \"bc30-leaf-v2\"")
+    if pre.get("leaf_type") != LEAF_TYPE_ISSUANCE: p.append("preimage.leaf_type must be 1")
+    for k, n in (("record_salt", 16), ("doc_sha256", 32), ("subject_ref", 32), ("policy_hash", 32)):
+        try: _hexb(pre.get(k), n, "preimage." + k)
+        except ValueError as e: p.append(str(e))
+    try: _hexb(rec.get("leaf_bytes"), 32, "record.leaf_bytes")
+    except ValueError as e: p.append(str(e))
+    st = pre.get("subject_type")
+    if st not in (0, 1, 2) or isinstance(st, bool): p.append("preimage.subject_type must be 0/1/2")
+    for k in ("issued_at", "expires_at"):
+        v = pre.get(k)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0: p.append("preimage.%s must be a non-negative integer" % k)
+    if isinstance(pre.get("issued_at"), int) and isinstance(pre.get("expires_at"), int) \
+            and pre["expires_at"] != 0 and pre["expires_at"] <= pre["issued_at"]:
+        p.append("preimage.expires_at must be 0 or later than issued_at")
+    if not isinstance(pre.get("policy"), dict): p.append("preimage.policy must be an object")
+    if "content_type" in pre and (not isinstance(pre["content_type"], str) or not pre["content_type"]):
+        p.append("preimage.content_type, when present, must be a non-empty string")
+    if st == SUBJECT_PUBKEY:
+        sub = b.get("subject")
+        if not isinstance(sub, dict): p.append("subject section required for subject_type 2")
+        elif sub.get("curve_id") not in (CURVE_P256, CURVE_SECP256K1) or isinstance(sub.get("curve_id"), bool):
+            p.append("subject.curve_id must be 1 (P-256) or 2 (secp256k1)")
+        else:
+            try: _hexb(sub.get("public_key"), 33, "subject.public_key")
+            except ValueError as e: p.append(str(e))
+    aux = b["aux"]
+    if aux.get("scheme") != "bc30-aux-v2": p.append("aux.scheme must be \"bc30-aux-v2\"")
+    for k in ("tl_root", "sl_root", "envelope_root"):
+        try: _hexb(aux.get(k), 32, "aux." + k)
+        except ValueError as e: p.append(str(e))
+    if aux.get("tl_entry") is not None or aux.get("tl_proof") is not None:
+        p.append("a signers[] bundle carries per-signer tl_entry/tl_proof - aux must not carry them (§12.4)")
+    sg = b["signers"]
+    if not (MULTISIG_MIN_COUNT <= len(sg) <= MULTISIG_MAX_COUNT):
+        p.append("signers[] must carry %d..=%d entries, got %d" % (MULTISIG_MIN_COUNT, MULTISIG_MAX_COUNT, len(sg)))
+    for i, e in enumerate(sg):
+        tag = "signers[%d]" % i
+        if not isinstance(e, dict):
+            p.append("%s must be an object" % tag); continue
+        for k in e:
+            if k not in V5_SIGNER_FIELDS:
+                p.append("%s.%s is not an allowed field (there is deliberately no per-signer sl_proof - §12.4)" % (tag, k))
+        if e.get("role") not in ROLE_ORD:
+            p.append("%s.role must be one of: %s" % (tag, " | ".join(sorted(ROLE_ORD, key=ROLE_ORD.get))))
+        alg = e.get("alg")
+        if alg not in ALG_NAMES_V5:
+            p.append("%s.alg must be webauthn-es256 | es256-plain | wallet-secp256k1" % tag); continue
+        if e.get("curve_id") != ALG_CURVE_V5[alg] or isinstance(e.get("curve_id"), bool):
+            p.append("%s: alg %s requires curve_id %d (MUST 3)" % (tag, alg, ALG_CURVE_V5[alg]))
+        for k, n in (("public_key", 33), ("key_id", 32)):
+            try: _hexb(e.get(k), n, "%s.%s" % (tag, k))
+            except ValueError as ve: p.append(str(ve))
+        if alg != "webauthn-es256" and e.get("rp_id") is not None:
+            p.append("%s.rp_id is only meaningful for webauthn-es256" % tag)
+        asn = e.get("assertion")
+        if not isinstance(asn, dict):
+            p.append("%s.assertion missing" % tag)
+        else:
+            need = V5_ASSERTION_FIELDS[alg]
+            for k in asn:
+                if k not in need: p.append("%s.assertion.%s is not an allowed field for %s" % (tag, k, alg))
+            for k in need:
+                v = asn.get(k)
+                if not isinstance(v, str) or not v or len(v) % 2 or not re.match(r"^[0-9a-fA-F]*$", v):
+                    p.append("%s.assertion.%s must be hex" % (tag, k))
+                elif k == "signature_rs" and len(v) != 128:
+                    p.append("%s.assertion.signature_rs must be 128 hex chars (r ‖ s, 64 B)" % tag)
+        tle, tp = e.get("tl_entry"), e.get("tl_proof")
+        if (tle is None) != (tp is None):
+            p.append("%s: tl_entry and tl_proof are BOTH present or BOTH absent (MUST 2)" % tag)
+        if tle is not None:
+            if not isinstance(tle, dict):
+                p.append("%s.tl_entry must be an object" % tag)
+            else:
+                for k, n in (("issuer_id", 16), ("key_id", 32), ("public_key", 33)):
+                    try: _hexb(tle.get(k), n, "%s.tl_entry.%s" % (tag, k))
+                    except ValueError as ve: p.append(str(ve))
+                if tle.get("curve_id") not in (CURVE_P256, CURVE_SECP256K1) or isinstance(tle.get("curve_id"), bool):
+                    p.append("%s.tl_entry.curve_id must be 1 (P-256) or 2 (secp256k1)" % tag)
+                for k in ("valid_from", "valid_to", "revoked_at"):
+                    v = tle.get(k)
+                    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                        p.append("%s.tl_entry.%s must be a non-negative integer" % (tag, k))
+        if tp is not None and not isinstance(tp, dict):
+            p.append("%s.tl_proof must be an object" % tag)
+    m = b["merkle"]
+    if not isinstance(m.get("siblings"), list) or not isinstance(m.get("directions"), list): p.append("merkle.siblings/directions must be arrays")
+    if not isinstance(b["anchor"].get("op_return_payload_hex"), str): p.append("anchor.op_return_payload_hex missing")
+    return p
+
+def _v5_reassemble_inner(signer):
+    """§12.5: rebuild one entry's inner_sig from its assertion fields. The alg
+    byte mapping is closed, so a 0x10 nesting cannot even be EXPRESSED here."""
+    asn = signer["assertion"]
+    if signer["alg"] == "webauthn-es256":
+        return issuer_sig_bytes(ALG_WEBAUTHN_ES256, bytes.fromhex(asn["signature_der"]),
+                                bytes.fromhex(asn["authenticator_data"]), bytes.fromhex(asn["client_data_json"]))
+    if signer["alg"] == "es256-plain":
+        return issuer_sig_bytes(ALG_ES256_PLAIN, bytes.fromhex(asn["signature_der"]))
+    return b"\x04" + bytes.fromhex(asn["signature_rs"])
+
+def verify_v5_multi(bundle, identifier=None, presentation=None, nonce_hex=None, rp_id=None, origins=None,
+                    now=None, explorer=None, original_bytes=None):
+    """schema §12.6 - the 13 MUSTs over a signers[] bundle, reported as numbered
+    steps (0-21) on the same four grades / two axes as verify_v4. Steps 0-4 and
+    the anchor/aux/presentation tail mirror §11; the middle is per-signer."""
+    R = V4Report()
+    rp_id = rp_id or BC30_RP_ID
+    origins = list(origins) if origins else list(BC30_ORIGINS)
+    now = int(time.time()) if now is None else int(now)
+    R.info.update(rp_id=rp_id, origins=origins, now=now)
+
+    # 0 · schema (MUST 2 JSON shape + MUST 3 + §12.8 canonical envelope)
+    probs = _v5_multi_schema_problems(bundle)
+    if probs:
+        R.step(0, "schema", "bad", "0 · Schema - bundle is not a well-formed v5 multi-signature bundle", "\n".join(probs))
+        return R
+    signers = bundle["signers"]
+    R.step(0, "schema", "ok", "0 · Schema - bitcert-proof-bundle/v5 multi-signature (%d signers) · network: %s"
+           % (len(signers), bundle.get("bitcoin_network", "?")),
+           "sections: record · merkle · anchor · signers · aux" + (" · subject" if bundle.get("subject") else "")
+           + (" · presentation" if bundle.get("presentation") else ""))
+    rec, pre, anchor, aux = bundle["record"], bundle["record"]["preimage"], bundle["anchor"], bundle["aux"]
+    st = pre["subject_type"]
+
+    # 1 · payload (identical rule to §11 step 1)
+    decoded = None
+    try:
+        decoded = decode_anchor_payload(anchor["op_return_payload_hex"])
+        if decoded["format"] != "BC30":
+            R.step(1, "payload", "bad", "1 · Anchor payload - %s cannot carry a bound batch (86-byte payload v31 required)" % payload_name(decoded))
+        elif decoded["version"] != OP_RETURN_V31_VERSION:
+            R.step(1, "payload", "bad", "1 · Anchor payload - version 0x%02x, v5 requires 0x1F" % decoded["version"],
+                   "a legacy (0x1E) anchor cannot be presented as identity-bound")
+        elif decoded["flags"] & ~FLAGS_DEFINED_MASK_V31:
+            R.step(1, "payload", "bad", "1 · Anchor payload - undefined flag bits 0x%02x" % decoded["flags"])
+        elif not decoded["flags"] & FLAG_IDENTITY_BOUND:
+            R.step(1, "payload", "bad", "1 · Anchor payload - IDENTITY_BOUND (bit 1) not set",
+                   "this anchor is not a bound batch; a v5 bundle cannot ride on it")
+        elif decoded["flags"] & FLAG_WITNESS_PRESENT and "inscription" in bundle:
+            R.step(1, "payload", "ok", "1 · Anchor payload - v31 (0x1F), flags 0b11, IDENTITY_BOUND + WITNESS_PRESENT (③ inscription)",
+                   "batch_id: %s\naux_commitment: %s" % (decoded["batch_id"], decoded["aux"]))
+        elif decoded["flags"] & FLAG_WITNESS_PRESENT:
+            R.step(1, "payload", "bad", "1 · Anchor payload - WITNESS_PRESENT (bit 0) is set, but no ③ envelope is carried",
+                   "flags 0b11 is the ③ discriminator (MUST 16): with bit 0 set the bundle MUST carry `inscription`.\n"
+                   "This is a refusal, not a warning - the previous revision only warned here.")
+        else:
+            R.step(1, "payload", "ok", "1 · Anchor payload - v31 (0x1F), flags 0b%s, IDENTITY_BOUND" % format(decoded["flags"], "02b"),
+                   "batch_id: %s\naux_commitment: %s" % (decoded["batch_id"], decoded["aux"]))
+    except Exception as e:
+        R.step(1, "payload", "bad", "1 · Anchor payload - error", str(e))
+
+    # 2 · policy hash + grammar (MUST 11)
+    try:
+        ph = policy_hash(pre["policy"])
+        ok = ph.hex() == pre["policy_hash"].lower()
+        grammar_err = None
+        if ok:
+            try:
+                policy_validate(pre["policy"])
+            except PolicyError as pe:
+                grammar_err = str(pe)
+        if grammar_err is not None:
+            R.step(2, "policy", "bad", "2 · Policy - hash recomputes, but the grammar is violated ✗ (MUST 11)",
+                   "%s\nJCS: %s" % (grammar_err, policy_jcs(pre["policy"]).decode("utf-8")))
+        else:
+            R.step(2, "policy", "ok" if ok else "bad", "2 · Policy hash - %s" % ("recomputes ✓" if ok else "MISMATCH ✗"),
+                   "JCS: %s\nrecomputed: %s" % (policy_jcs(pre["policy"]).decode("utf-8"), ph.hex()))
+    except Exception as e:
+        R.step(2, "policy", "bad", "2 · Policy hash - error", str(e))
+
+    # 3 · subject_ref
+    salt, ref = bytes.fromhex(pre["record_salt"]), bytes.fromhex(pre["subject_ref"])
+    subject_pk = None
+    if st == SUBJECT_NONE:
+        ok = ref == subject_ref_none()
+        R.step(3, "subject", "ok" if ok else "bad", "3 · Subject - none (subject_ref %s)" % ("is zero ✓" if ok else "must be zero ✗"))
+        R.axes["attribution"] = "none"
+    elif st == SUBJECT_ID_HASH:
+        R.axes["attribution"] = "issuer-claim · identifier"
+        if identifier is None:
+            R.step(3, "subject", "skip", "3 · Subject - identifier hash, not checked",
+                   "pass --identifier <the identifier the issuer wrote> to recompute SHA256(record_salt ‖ identifier)")
+            R.axes["attribution"] += " · not checked"
+        else:
+            got = subject_ref_id_hash(salt, identifier)
+            ok = got == ref
+            R.step(3, "subject", "ok" if ok else "bad", "3 · Subject - identifier %s the salted reference" % ("matches ✓" if ok else "does NOT match ✗"),
+                   "SHA256(record_salt ‖ identifier): %s" % got.hex())
+            R.axes["attribution"] += " ✓" if ok else " ✗"
+    else:
+        R.axes["attribution"] = "issuer-claim · pubkey"
+        try:
+            sub = bundle["subject"]
+            subject_pk = bytes.fromhex(sub["public_key"])
+            if sub["curve_id"] == CURVE_SECP256K1:
+                secp256k1_decompress(subject_pk)
+            else:
+                p256_decompress(subject_pk)
+            got = subject_ref_pubkey(sub["curve_id"], subject_pk)
+            ok = got == ref
+            R.step(3, "subject", "ok" if ok else "bad", "3 · Subject - registered key %s subject_ref" % ("normalises to ✓" if ok else "does NOT match ✗"),
+                   "SHA256(0x02 ‖ curve 0x%02x ‖ pubkey): %s\npublic_key: %s" % (sub["curve_id"], got.hex(), sub["public_key"]))
+            if not ok: subject_pk = None
+        except Exception as e:
+            R.step(3, "subject", "bad", "3 · Subject - public key unusable", str(e))
+
+    # 4 · R and m
+    Rb = m = None
+    try:
+        doc = bytes.fromhex(pre["doc_sha256"])
+        args = (salt, doc, st, ref, pre["issued_at"], pre["expires_at"], bytes.fromhex(pre["policy_hash"]))
+        Rb, m = record_bytes(*args), issue_message(*args)
+        R.info.update(m_hex=m.hex(), m_b64u=b64u_encode(m))
+        detail = "m: %s (no entry signs the bare m - each signs its role-bound m_i)" % m.hex()
+        if original_bytes is not None:
+            got = sha256(original_bytes)
+            if got == doc:
+                R.step(4, "record", "ok", "4 · Record R · message m - reconstructed, original binds to H(D) ✓", detail + "\nSHA256(original): %s" % got.hex())
+            else:
+                R.step(4, "record", "bad", "4 · Record R · message m - supplied original does NOT hash to doc_sha256 ✗",
+                       detail + "\nSHA256(original): %s\ndoc_sha256:       %s" % (got.hex(), doc.hex()))
+        else:
+            R.step(4, "record", "ok", "4 · Record R · message m - reconstructed (143 B record)", detail + "\noriginal not supplied - H(D) taken from the bundle")
+    except Exception as e:
+        R.step(4, "record", "bad", "4 · Record R · message m - error", str(e))
+
+    # 5 · reassemble s + strict parse (MUST 1 + byte-level MUST 2)
+    s_bytes, parsed = None, None
+    try:
+        triples = [(e["role"], bytes.fromhex(e["key_id"]), _v5_reassemble_inner(e)) for e in signers]
+        s_bytes = assemble_multisig_s(triples)
+        parsed = parse_multisig_s(s_bytes)
+        lines = ["[%d] %-15s key_id %s · inner alg 0x%02x · %d B" % (i, e["role"], e["key_id"].hex(), e["alg"], len(e["inner"]))
+                 for i, e in enumerate(parsed)]
+        R.info["s_len"] = len(s_bytes)
+        R.step(5, "reassembly", "ok", "5 · Envelope - s reassembled (0x10, %d entries, %d B) and parses strictly ✓" % (len(parsed), len(s_bytes)),
+               "\n".join(lines))
+    except MultisigError as e:
+        parsed = None
+        R.step(5, "reassembly", "bad", "5 · Envelope - reassembled s REFUSED by the strict parse ✗",
+               "%s\nthe receiver never re-sorts; a mis-ordered or re-labelled signers[] must fail here" % e)
+    except Exception as e:
+        parsed = None
+        R.step(5, "reassembly", "bad", "5 · Envelope - error", str(e))
+
+    # 6 · per-signer key binding (MUST 4 + MUST 5)
+    try:
+        probs, lines = [], []
+        for i, e in enumerate(signers):
+            pk = bytes.fromhex(e["public_key"])
+            kid = key_id(e["curve_id"], pk)
+            if kid.hex() != e["key_id"].lower():
+                probs.append("signers[%d]: key_id ≠ SHA256(0x02 ‖ curve ‖ public_key) (MUST 4)" % i)
+            tle = e.get("tl_entry")
+            if tle is not None:
+                if str(tle.get("key_id", "")).lower() != e["key_id"].lower():
+                    probs.append("signers[%d]: tl_entry.key_id ≠ entry key_id (MUST 5)" % i)
+                if str(tle.get("public_key", "")).lower() != e["public_key"].lower():
+                    probs.append("signers[%d]: tl_entry.public_key ≠ entry public_key (MUST 5)" % i)
+                if tle.get("curve_id") != e["curve_id"]:
+                    probs.append("signers[%d]: tl_entry.curve_id ≠ entry curve_id (MUST 5)" % i)
+            lines.append("[%d] %-15s key_id %s ✓" % (i, e["role"], kid.hex()))
+        R.step(6, "key_binding", "ok" if not probs else "bad",
+               "6 · Signer keys - key_id %s each public key" % ("re-derives from ✓" if not probs else "does NOT bind ✗"),
+               "\n".join(lines if not probs else ["· " + x for x in probs]))
+    except Exception as e:
+        R.step(6, "key_binding", "bad", "6 · Signer keys - error", str(e))
+
+    # 7 · signatures over each m_i (MUST 6)
+    try:
+        if parsed is None or m is None:
+            raise ValueError("envelope or message m unavailable")
+        probs, lines = [], []
+        for i, (e, pe) in enumerate(zip(signers, parsed)):
+            tle = e.get("tl_entry")
+            pk = bytes.fromhex(tle["public_key"]) if tle is not None else bytes.fromhex(e["public_key"])
+            ok, errid, reasons = verify_multisig_entry(pe, pk, m, rp_id, origins)
+            src = "tl_entry key" if tle is not None else "entry key (unlisted)"
+            if ok:
+                lines.append("[%d] %-15s %s · m_i %s ✓" % (i, pe["role"], src, cosign_message(m, pe["role"]).hex()[:16]))
+            else:
+                probs.append("signers[%d] %s: %s%s" % (i, pe["role"], errid, (" - " + "; ".join(reasons)) if reasons else ""))
+        R.step(7, "signer_sigs", "ok" if not probs else "bad",
+               "7 · Signer signatures - %s" % ("every entry verifies over its role-bound m_i ✓" if not probs else "REJECTED ✗"),
+               "\n".join(lines if not probs else ["· " + x for x in probs]))
+    except Exception as e:
+        R.step(7, "signer_sigs", "bad", "7 · Signer signatures - error", str(e))
+
+    # 8 · leaf_input
+    li = None
+    try:
+        if Rb is None or s_bytes is None:
+            raise ValueError("record or signature bytes unavailable")
+        li = leaf_input_v2(LEAF_TYPE_ISSUANCE, Rb, s_bytes)
+        ok = li.hex() == rec["leaf_bytes"].lower()
+        R.info["leaf_input"] = li.hex()
+        R.step(8, "leaf", "ok" if ok else "bad", "8 · leaf_input - SHA256(leaf-v2 tag ‖ 0x01 ‖ R ‖ s) %s record.leaf_bytes" % ("== ✓" if ok else "≠ ✗"),
+               "recomputed: %s\nclaimed:    %s" % (li.hex(), rec["leaf_bytes"]))
+    except Exception as e:
+        R.step(8, "leaf", "bad", "8 · leaf_input - error", str(e))
+
+    # 9 · merkle inclusion
+    merkle_root = None
+    claimed_leaf = bytes.fromhex(rec["leaf_bytes"])
+    try:
+        computed, ok = verify_merkle(rec, bundle["merkle"])
+        merkle_root = computed if ok else None
+        R.step(9, "merkle", "ok" if ok else "bad", "9 · Merkle inclusion - leaf is %s the root" % ("in" if ok else "NOT in"),
+               "recomputed root: %s" % computed + ("" if ok else "\nclaimed root:    %s" % bundle["merkle"].get("root")))
+    except Exception as e:
+        R.step(9, "merkle", "bad", "9 · Merkle inclusion - error", str(e))
+
+    # 10 · anchor output root (closes MUST 12: s → leaf_input → Merkle → payload)
+    if decoded is not None and merkle_root is not None:
+        ok = decoded["merkle_root"].lower() == merkle_root.lower()
+        R.step(10, "root", "ok" if ok else "bad", "10 · Anchor output - merkle_root is %s on-chain" % ("committed ✓" if ok else "NOT committed ✗"),
+               "payload merkle_root: %s" % decoded["merkle_root"])
+    else:
+        R.step(10, "root", "bad", "10 · Anchor output - cannot compare (payload or root unavailable)")
+
+    # 11 · trust list per signer (MUST 7 + MUST 9)
+    proven = {}
+    try:
+        probs, lines = [], []
+        for i, e in enumerate(signers):
+            tle, tp = e.get("tl_entry"), e.get("tl_proof")
+            if tle is None:
+                if e["role"] in ("issuer", "co-issuer"):
+                    probs.append("signers[%d] %s has no tl_proof - an organisation key MUST be proven listed (MUST 9)" % (i, e["role"]))
+                else:
+                    lines.append("[%d] %-15s unlisted key - revocation not provable (allowed for this role)" % (i, e["role"]))
+                continue
+            entry = tl_entry_bytes(bytes.fromhex(tle["issuer_id"]), bytes.fromhex(tle["key_id"]), tle["curve_id"],
+                                   bytes.fromhex(tle["public_key"]), tle["valid_from"], tle["valid_to"], tle["revoked_at"])
+            computed, inc = verify_merkle({"leaf_bytes": tl_leaf(entry).hex()},
+                                          {"root": aux["tl_root"], "siblings": tp.get("siblings", []), "directions": tp.get("directions", [])})
+            if inc:
+                proven[i] = tle
+                lines.append("[%d] %-15s issuer_id %s · listed under TL_root ✓" % (i, e["role"], tle["issuer_id"]))
+            else:
+                probs.append("signers[%d] %s: tl_entry does NOT fold to the aux TL_root (recomputed %s)" % (i, e["role"], computed))
+        R.step(11, "trust_list", "ok" if not probs else "bad",
+               "11 · Trust list - %s" % ("every organisation key proven under the ONE platform TL_root ✓" if not probs else "NOT proven ✗"),
+               "\n".join(lines + ["· " + x for x in probs]) +
+               "\nlisting proves the KEY; approval of THIS record is proven only by the m_i signature")
+    except Exception as e:
+        R.step(11, "trust_list", "bad", "11 · Trust list - error", str(e))
+
+    # 12 · envelope_root (a ③ bundle commits a real one - recomputed from the witness below)
+    ok = aux["envelope_root"].lower() == envelope_root_none().hex()
+    if not ok and "inscription" in bundle:
+        R.step(12, "envelope", "ok", "12 · Envelope root - an inscription envelope (③) is committed here ✓",
+               "%s\nrecomputed from the reveal witness in the ③ steps below" % aux["envelope_root"].lower())
+    else:
+        R.step(12, "envelope", "ok" if ok else "bad", "12 · Envelope root - %s" % ("constant (envelope-none tag) ✓" if ok else "unexpected value ✗"),
+               "" if ok else "expected %s" % envelope_root_none().hex())
+
+    # 13 · aux recompute
+    try:
+        got = aux_commitment(bytes.fromhex(aux["tl_root"]), bytes.fromhex(aux["sl_root"]), bytes.fromhex(aux["envelope_root"]))
+        if decoded is None or decoded.get("format") != "BC30":
+            R.step(13, "aux", "bad", "13 · aux_commitment - no 86-byte payload to compare against", "recomputed: %s" % got.hex())
+        else:
+            ok = got.hex() == decoded["aux"].lower()
+            R.step(13, "aux", "ok" if ok else "bad", "13 · aux_commitment - SHA256(aux tag ‖ TL ‖ SL ‖ env) %s on-chain" % ("matches ✓" if ok else "MISMATCH ✗"),
+                   "recomputed: %s\non-chain:   %s" % (got.hex(), decoded["aux"]))
+    except Exception as e:
+        R.step(13, "aux", "bad", "13 · aux_commitment - error", str(e))
+
+    # 14 · key validity at block time (MUST 8, graded per §12.7)
+    bt = None
+    try:
+        confirmed = anchor.get("confirmed")
+        bt = confirmed.get("block_time") if isinstance(confirmed, dict) else None
+        if not isinstance(bt, int) or isinstance(bt, bool) or bt <= 0:
+            bt = None
+            R.step(14, "key_validity", "undet", "14 · Key validity - no block_time in the bundle",
+                   "each signer key's validity window is judged at the BLOCK time, not at issued_at; without it the outcome is undetermined")
+        else:
+            R.info["block_time"] = bt
+            hard, soft, lines = [], [], []
+            for i, tle in proven.items():
+                role = signers[i]["role"]
+                vf, vt, ra = tle["valid_from"], tle["valid_to"], tle["revoked_at"]
+                bad_reasons = []
+                if vf > bt: bad_reasons.append("valid_from %d is after block_time %d" % (vf, bt))
+                if vt and vt < bt: bad_reasons.append("valid_to %d is before block_time %d" % (vt, bt))
+                if ra and ra <= bt: bad_reasons.append("revoked at %d, on or before block_time %d" % (ra, bt))
+                if bad_reasons:
+                    (hard if role in ("issuer", "co-issuer") else soft).append("signers[%d] %s: %s" % (i, role, "; ".join(bad_reasons)))
+                else:
+                    lines.append("[%d] %-15s valid at block time ✓" % (i, role))
+            if hard:
+                R.step(14, "key_validity", "bad", "14 · Key validity - an organisation key NOT valid at block time ✗ (§12.7: rejected)",
+                       "\n".join("· " + x for x in hard + soft))
+            elif soft:
+                R.step(14, "key_validity", "warn", "14 · Key validity - a consent/endorser key invalid at block time (§12.7: flagged, verdict stands)",
+                       "\n".join(lines + ["· " + x for x in soft]))
+            elif pre["issued_at"] > bt + 7200:
+                R.step(14, "key_validity", "warn", "14 · Key validity - keys valid, but issued_at is more than 2 h after the block",
+                       "issued_at %d · block_time %d (self-reported time is only sanity-checked)" % (pre["issued_at"], bt))
+            else:
+                R.step(14, "key_validity", "ok", "14 · Key validity - every proven key valid at block time ✓",
+                       "block_time %d\n%s" % (bt, "\n".join(lines) if lines else "(no listed keys to judge)"))
+    except Exception as e:
+        R.step(14, "key_validity", "bad", "14 · Key validity - error", str(e))
+
+    # 15 · txid binding
+    txid = anchor.get("reveal_txid")
+    raw = anchor.get("reveal_tx_hex")
+    if not raw:
+        R.step(15, "txid", "undet", "15 · Transaction binding - no reveal_tx_hex", "a v5 bundle without the raw transaction cannot bind the payload to a txid")
+    else:
+        try:
+            computed_txid, anchor_payload = txid_from_raw(raw)
+            txid_ok = computed_txid.lower() == (txid or "").lower()
+            op_ok = (anchor_payload or "").lower() == anchor["op_return_payload_hex"].lower()
+            ok = txid_ok and op_ok
+            if ok: txid = computed_txid
+            R.step(15, "txid", "ok" if ok else "bad", "15 · Transaction binding - payload %s txid" % ("belongs to ✓" if ok else "does NOT match ✗"),
+                   "computed txid: %s\nbundle  txid: %s\npayload in raw tx %s" % (computed_txid, anchor.get("reveal_txid"), "matches ✓" if op_ok else "MISMATCH ✗"))
+        except Exception as e:
+            R.step(15, "txid", "bad", "15 · Transaction binding - error", str(e))
+    R.info["txid"] = txid
+
+    # 16 · document expiry
+    exp = pre["expires_at"]
+    if exp == 0:
+        R.step(16, "expiry", "ok", "16 · Document expiry - none declared")
+    elif exp < now:
+        R.step(16, "expiry", "warn", "16 · Document expiry - EXPIRED", "expires_at %d < now %d" % (exp, now))
+    else:
+        R.step(16, "expiry", "ok", "16 · Document expiry - valid until %d" % exp, "now %d" % now)
+
+    # 17 · record revocation at anchor time (MUST 10 - aux.sl_proof, singular)
+    sp = aux.get("sl_proof")
+    if not isinstance(sp, dict):
+        R.step(17, "revocation", "undet", "17 · Revocation at anchor - no sl_proof in the bundle",
+               "without an exclusion proof against sl_root the revocation status at anchor time is undetermined")
+    else:
+        try:
+            key = _hexb(sp.get("key"), 32, "sl_proof.key")
+            if key != claimed_leaf:
+                raise ValueError("sl_proof.key is not this record's leaf_input")
+            sibs = sp.get("siblings")
+            if not isinstance(sibs, list) or len(sibs) != SMT_HEIGHT:
+                raise ValueError("sl_proof must carry exactly 256 siblings")
+            sibs = [_hexb(x, 32, "sibling") for x in sibs]
+            val = _hexb_opt(sp.get("value"), 32, "sl_proof.value")
+            folded = smt_fold(key, val, sibs)
+            if folded.hex() != aux["sl_root"].lower():
+                R.step(17, "revocation", "bad", "17 · Revocation at anchor - proof does NOT fold to sl_root ✗",
+                       "folded: %s\nsl_root: %s\n(exclusion folds from the pinned EMPTY_LEAF %s)" % (folded.hex(), aux["sl_root"], SMT_EMPTY_LEAF.hex()))
+            elif val is not None:
+                ra = int.from_bytes(val[24:], "big")
+                R.step(17, "revocation", "bad", "17 · Revocation at anchor - record was ALREADY REVOKED when anchored ✗",
+                       "sl value: %s (revoked_at %d)" % (val.hex(), ra))
+            else:
+                R.step(17, "revocation", "ok", "17 · Revocation at anchor - not revoked (exclusion proof) ✓",
+                       "sl_root: %s\nlater revocation needs an online status-list check (not part of this bundle)" % aux["sl_root"])
+        except Exception as e:
+            R.step(17, "revocation", "bad", "17 · Revocation at anchor - invalid proof", str(e))
+
+    # 18 · subject binding (MUST 13 - a mismatch WARNS, never rejects)
+    consent = [(i, e) for i, e in enumerate(signers) if e["role"] == "subject-consent"]
+    if st != SUBJECT_PUBKEY or not consent:
+        R.step(18, "subject_binding", "skip", "18 · Subject consent binding - not applicable",
+               "needs subject_type 2 AND a subject-consent entry" +
+               ("" if not consent else "\n(consent entries present, but the record names no registered subject key)"))
+    else:
+        match = [i for i, e in consent if e["key_id"].lower() == pre["subject_ref"].lower()]
+        if match:
+            R.step(18, "subject_binding", "ok", "18 · Subject consent binding - consent signed with the subject's OWN registered key ✓",
+                   "signers[%d].key_id == subject_ref" % match[0])
+        else:
+            R.step(18, "subject_binding", "warn", "18 · Subject consent binding - NOT the subject's own consent (flagged, verdict stands)",
+                   "no subject-consent key_id equals subject_ref %s\nthe consent signature is valid, but it was not given by the record's named subject key" % pre["subject_ref"])
+
+    # 19 · presentation - never rejects; degrades to "not available"
+    pres = presentation if presentation is not None else bundle.get("presentation")
+    if st != SUBJECT_PUBKEY:
+        R.axes["presenter"] = "not available"
+        R.step(19, "presentation", "skip", "19 · Presenter - not applicable (no registered recipient key)",
+               "only a subject_type 2 record can be presented with a passkey" + ("" if pres is None else "\nsupplied presentation ignored"))
+    elif pres is None:
+        R.axes["presenter"] = "not available"
+        R.step(19, "presentation", "skip", "19 · Presenter - no presentation supplied",
+               "start a presenter check (--present-url) and pass the /present blob with --present + --nonce to confirm the holder")
+    else:
+        try:
+            p = normalize_presentation(pres) if not (isinstance(pres, dict) and isinstance(pres.get("leaf"), bytes)) else pres
+            probs = []
+            if p["leaf"] != claimed_leaf: probs.append("presentation is for a different record (leaf mismatch)")
+            if nonce_hex is None: probs.append("nonce ownership not established - pass --nonce <hex you generated>")
+            elif p["nonce"].hex() != nonce_hex.lower(): probs.append("presentation nonce is not ours (replay from another verifier?)")
+            if p["expiry"] < now: probs.append("presentation expired (expiry %d < now %d)" % (p["expiry"], now))
+            if subject_pk is None: probs.append("subject key unusable (see step 3)")
+            facts = {}
+            if subject_pk is not None:
+                ch = present_challenge(p["nonce"], p["leaf"], p["verifier_id"], p["expiry"])
+                ok, reasons, facts = webauthn_verify_assertion(subject_pk, p["authenticator_data"], p["client_data_json"], p["signature"], ch, rp_id, origins)
+                probs += reasons
+                R.info["present_challenge"] = ch.hex()
+            detail = "nonce %s · expiry %d · verifier_id %s\nrpId pinned %r · origin %s · UV %s" % (
+                p["nonce"].hex(), p["expiry"], p["verifier_id"].hex(), rp_id, facts.get("origin"), facts.get("uv"))
+            if probs:
+                R.axes["presenter"] = "not available"
+                R.step(19, "presentation", "warn", "19 · Presenter - NOT confirmed (degraded, not rejected)", detail + "\n" + "\n".join("· " + x for x in probs))
+            else:
+                R.axes["presenter"] = "confirmed"
+                R.step(19, "presentation", "ok", "19 · Presenter - holder of the registered key confirmed ✓", detail)
+        except Exception as e:
+            R.axes["presenter"] = "not available"
+            R.step(19, "presentation", "warn", "19 · Presenter - presentation unreadable (degraded)", str(e))
+
+    # 20 · chain (§5, optional)
+    ch = bundle.get("chain")
+    if ch and isinstance(ch, dict) and ch.get("entry"):
+        try:
+            e = ch["entry"]
+            phash = payload_hash(e)
+            ph_ok = phash.lower() == str(e.get("payload_hash", "")).lower()
+            body_ok = True if e.get("kind") != "daily" else (merkle_root is not None and str(e.get("body_hash", "")).lower() == merkle_root.lower())
+            link_ok, link_detail = _verify_chain_links(ch.get("links") or [], e)
+            ok = ph_ok and body_ok and link_ok
+            R.step(20, "chain", "ok" if ok else "bad", "20 · Chain entry - payload_hash %s" % ("recomputes ✓" if ok else "MISMATCH ✗"),
+                   "seq %s (%s)\nrecomputed payload_hash: %s%s" % (e.get("seq"), e.get("kind"), phash, ("\n" + link_detail) if link_detail else ""))
+        except Exception as e:
+            R.step(20, "chain", "bad", "20 · Chain entry - error", str(e))
+    else:
+        R.step(20, "chain", "skip", "20 · Chain entry - none carried")
+
+    # 21 · on-chain (optional)
+    if explorer and txid:
+        try:
+            confirmed, stt = check_on_chain(explorer, txid)
+            if not confirmed:
+                R.step(21, "onchain", "warn", "21 · On-chain - seen but not yet confirmed via %s" % explorer)
+            elif isinstance(bt, int) and stt.get("block_time") not in (None, bt):
+                R.step(21, "onchain", "warn", "21 · On-chain - confirmed, but block_time differs from the bundle",
+                       "explorer block_time %s · bundle %s" % (stt.get("block_time"), bt))
+            else:
+                R.step(21, "onchain", "ok", "21 · On-chain - confirmed via %s" % explorer,
+                       "block height %s · block_time %s" % (stt.get("block_height"), stt.get("block_time")))
+        except Exception as e:
+            R.step(21, "onchain", "warn", "21 · On-chain - could not reach explorer", "%s\nsteps 1–17 are already proven offline" % e)
+    else:
+        R.step(21, "onchain", "skip", "21 · On-chain confirmation - SKIPPED (offline / no --explorer)",
+               "txid: %s\npass --explorer <url> (any Bitcoin source, never BitCert) to confirm and compare block_time" % txid)
+    R.info["signers_summary"] = [{"role": e["role"], "alg": e["alg"], "key_id": e["key_id"],
+                                  "listed": i in proven} for i, e in enumerate(signers)]
+
+    # 22+ · ③ inscription tier (MUST 14-26) - appended only when claimed
+    if _inscription_claimed(bundle, decoded):
+        _inscription_steps(R, bundle, decoded, 22, Rb, s_bytes, explorer)
+    return R
+
+def verify_v5(bundle, **kw):
+    """Dispatch a /v5 bundle: signers[] takes the multi-signature pipeline,
+    a single-signature bundle keeps the v4 pipeline with the §12.8 additions
+    (verify_v4 detects the schema string itself)."""
+    if "signers" in bundle:
+        return verify_v5_multi(bundle, **kw)
+    return verify_v4(bundle, **kw)
+
+def kat_v2_party_checks(vec):
+    """Run every party-model v2 KAT section against the primitives above.
+    Returns [(ok, label)] - shared by --selftest and fixtures/generate.py so the
+    two gates cannot drift. `vec` is the parsed engine KAT copy."""
+    h = bytes.fromhex
+    out = []
+    def check(cond, label):
+        out.append((bool(cond), label))
+    missing = [k for k in ("cosign", "wallet", "multisig", "policy_open",
+                           "es256_plain_alternate_s", "negative_v2") if k not in vec]
+    if missing:
+        check(False, "v2 sections missing from the engine KAT copy: %s (stale fixtures/bc30-v2-vectors.json?)" % ", ".join(missing))
+        return out
+    m = h(vec["m"])
+
+    # cosign - m_i per role + the frozen role_ord table
+    co = vec["cosign"]
+    check(co["tag_utf8"] == COSIGN_TAG.decode("ascii") and h(co["m"]) == m, "v2 cosign - tag + m pinned")
+    for cv in co["vectors"]:
+        mi = cosign_message(m, cv["role"])
+        check(mi.hex() == cv["m_i"] and b64u_encode(mi) == cv["m_i_b64u"]
+              and ROLE_ORD.get(cv["role"]) == cv["role_ord"],
+              "v2 cosign - m_i(%s) + b64u + role_ord %d" % (cv["role"], cv["role_ord"]))
+
+    # wallet - message, double-SHA256 digest, direct-digest ECDSA, key_id, recovery
+    wa = vec["wallet"]
+    pub = h(wa["public_key"])
+    check(wa["curve_id"] == CURVE_SECP256K1, "v2 wallet - curve_id 2 (secp256k1)")
+    check(secp256k1_compress(_k1_mul(_SECP256K1_G, int(wa["priv"], 16))) == pub, "v2 wallet - public_key = compress(priv·G)")
+    msg = wallet_issuance_message(m)
+    check(msg.decode("ascii") == wa["issuance_message_utf8"] and len(msg) == wa["issuance_message_len"],
+          "v2 wallet - issuance message (\"BC30 issuance \" ‖ hex(m), %d B)" % wa["issuance_message_len"])
+    dg = bitcoin_message_digest(msg)
+    check(dg.hex() == wa["issuance_digest"], "v2 wallet - digest = double-SHA256(0x18 ‖ magic ‖ varint ‖ msg)")
+    rs = h(wa["signature_rs"])
+    r_w, s_w = int.from_bytes(rs[:32], "big"), int.from_bytes(rs[32:], "big")
+    check(secp256k1_is_low_s(s_w), "v2 wallet - engine signature is low-s")
+    check(secp256k1_verify_digest(pub, dg, r_w, s_w), "v2 wallet - secp256k1 ECDSA verifies the DIGEST directly")
+    check(not secp256k1_verify_digest(pub, sha256(dg), r_w, s_w), "v2 wallet - a re-hashed digest correctly fails (no library re-hash)")
+    check(wa["s_wallet"] == "04" + wa["signature_rs"] and len(h(wa["s_wallet"])) == 65,
+          "v2 wallet - s (0x04) = 0x04 ‖ r ‖ s, exactly 65 B, no header")
+    check(key_id(CURVE_SECP256K1, pub).hex() == wa["key_id"], "v2 wallet - key_id = SHA256(0x02 ‖ 0x02 ‖ pubkey33)")
+    rmsg = wallet_registration_message(h(wa["registration_challenge"]))
+    check(rmsg.decode("ascii") == wa["registration_message_utf8"] and len(rmsg) == wa["registration_message_len"],
+          "v2 wallet - registration message")
+    rdg = bitcoin_message_digest(rmsg)
+    check(rdg.hex() == wa["registration_digest"], "v2 wallet - registration digest")
+    sig65 = h(wa["registration_sig65"])
+    header, rr, sr = sig65[0], int.from_bytes(sig65[1:33], "big"), int.from_bytes(sig65[33:65], "big")
+    check(header == wa["registration_recovery_header"], "v2 wallet - recovery header %d" % header)
+    check(secp256k1_recover(rdg, header, rr, sr).hex() == wa["recovered_public_key"] == wa["public_key"],
+          "v2 wallet - registration recovery returns the 33 B compressed key")
+    # headers 27..=34 are ONE range: (header−27)&3 picks the point, the
+    # compression hint is ignored - 28 and 32 recover the same key.
+    twin = header - 4 if header >= 31 else header + 4
+    check(secp256k1_recover(rdg, twin, rr, sr) == secp256k1_recover(rdg, header, rr, sr),
+          "v2 wallet - compressed/uncompressed headers (%d/%d) recover the same key" % (header, twin))
+    for bad_h in (26, 35):
+        try:
+            secp256k1_recover(rdg, bad_h, rr, sr)
+            check(False, "v2 wallet - recovery header %d rejected" % bad_h)
+        except ValueError:
+            check(True, "v2 wallet - recovery header %d rejected" % bad_h)
+
+    # multisig - parse, reassemble (both directions), leaf binding, entry verify
+    ms = vec["multisig"]
+    pubmap = {}
+    try:
+        entries = parse_multisig_s(h(ms["s"]))
+    except MultisigError as e:
+        entries = None
+        check(False, "v2 multisig - positive s parses (%s)" % e)
+    if entries is not None:
+        check(len(entries) == ms["count"], "v2 multisig - count %d" % ms["count"])
+        check(assemble_multisig_s([(e["role"], e["key_id"], e["inner"]) for e in entries]).hex() == ms["s"],
+              "v2 multisig - parse → reassemble round-trips byte-for-byte")
+        check(assemble_multisig_s([(t["role"], h(t["key_id"]), h(t["inner_sig"])) for t in ms["entries"]]).hex() == ms["s"],
+              "v2 multisig - s rebuilt from the entry list (the v5 signers[] direction)")
+        li = leaf_input_v2(LEAF_TYPE_ISSUANCE, h(vec["R"]), h(ms["s"]))
+        check(li.hex() == ms["leaf_input"] and leaf_hash(li).hex() == ms["leaf_hash"],
+              "v2 multisig - leaf_input + leaf_hash bind the whole s")
+        for t in ms["entries"]:
+            pubmap[t["key_id"]] = (t["curve_id"], h(t["public_key"]))
+            check(key_id(t["curve_id"], h(t["public_key"])).hex() == t["key_id"],
+                  "v2 multisig - %s key_id re-derives (curve %d)" % (t["role"], t["curve_id"]))
+            check(cosign_message(m, t["role"]).hex() == t["m_i"], "v2 multisig - %s m_i" % t["role"])
+        went = next(t for t in ms["entries"] if t["inner_alg"] == ALG_WALLET_SECP256K1)
+        check(wallet_cosign_message(h(went["m_i"])).decode("ascii") == went["wallet_message_utf8"]
+              and bitcoin_message_digest(wallet_cosign_message(h(went["m_i"]))).hex() == went["wallet_digest"],
+              "v2 multisig - endorser wallet message + digest")
+        for e, t in zip(entries, ms["entries"]):
+            curve, pk = pubmap[e["key_id"].hex()]
+            check(INNER_ALG_CURVE.get(e["alg"]) == curve, "v2 multisig - %s alg 0x%02x ↔ curve_id %d" % (e["role"], e["alg"], curve))
+            ok, err, reasons = verify_multisig_entry(e, pk, m, vec["rp_id"], [vec["origin"]])
+            check(ok, "v2 multisig - %s entry verifies (alg 0x%02x)%s" % (e["role"], e["alg"], "" if ok else " [%s: %s]" % (err, "; ".join(reasons))))
+
+    # es256-plain alternate s - low-s NOT enforced for 0x02 (frozen by this positive)
+    alt = vec["es256_plain_alternate_s"]
+    check(alt["expect"] == "valid" and p256_verify(h(vec["issuer_pub33"]), m, h(alt["signature_der"])),
+          "v2 es256-plain - (r, n−s) re-encoding ACCEPTED (low-s not enforced for 0x01/0x02)")
+
+    # policy_open - grammar gate passes, JCS bytes + hash match
+    for pv in vec["policy_open"]["vectors"]:
+        try:
+            pol = policy_validate(pv["pairs"])
+            jcs = policy_jcs(pol)
+            check(jcs.hex() == pv["jcs_hex"] and jcs.decode("utf-8") == pv["jcs_utf8"]
+                  and sha256(jcs).hex() == pv["policy_hash"],
+                  "v2 policy - %s: grammar ok, JCS bytes + policy_hash" % pv["name"])
+        except PolicyError as e:
+            check(False, "v2 policy - %s unexpectedly refused (%s)" % (pv["name"], e))
+
+    # negative_v2 - all 27 must fail at their declared stage with their identifier
+    neg = vec["negative_v2"]
+    check(len(neg) == 27, "v2 negatives - 27 cases present")
+    def neg_verify_error(sb):
+        if sb[:1] == bytes([ALG_MULTISIG]):
+            try:
+                parsed = parse_multisig_s(sb)
+            except MultisigError as e:
+                return "parse:" + e.error          # oracle says parse must PASS for verify-stage cases
+            for pe in parsed:
+                info = pubmap.get(pe["key_id"].hex())
+                if info is None:
+                    return "unknown_key"
+                ok, err, _r = verify_multisig_entry(pe, info[1], m, vec["rp_id"], [vec["origin"]])
+                if not ok:
+                    return err
+            return None
+        if sb[:1] == bytes([ALG_WALLET_SECP256K1]) and len(sb) == 65:
+            r_n, s_n = int.from_bytes(sb[1:33], "big"), int.from_bytes(sb[33:65], "big")
+            if not secp256k1_is_low_s(s_n):
+                # prove it is the POLICY that rejects: the mirrored scalar verifies
+                if not secp256k1_verify_digest(pub, dg, r_n, _SECP256K1_N - s_n):
+                    return "bad_signature"
+                return "non_low_s"
+            return None if secp256k1_verify_digest(pub, dg, r_n, s_n) else "bad_signature"
+        return "unknown_alg"
+    for nc in neg:
+        want, got = nc["error"], None
+        if nc["stage"] == "parse":
+            try:
+                parse_multisig_s(h(nc["s"]))
+            except MultisigError as e:
+                got = e.error
+        elif nc["stage"] == "policy":
+            try:
+                policy_validate(nc["pairs"])
+            except PolicyError as e:
+                got = e.error
+        elif nc["stage"] == "verify":
+            got = neg_verify_error(h(nc["s"]))
+        check(got == want, "v2 negative - %s fails at %s with %r%s"
+              % (nc["name"], nc["stage"], want, "" if got == want else " (got %r)" % (got,)))
+    return out
+
+def kat_inscription_checks(vec):
+    """Run the engine KAT's `inscription` section (the ③ T0 freeze,
+    docs/inscription-tier-spec-2026-09-02.md) against the primitives above.
+    Returns [(ok, label)] - shared by --selftest and fixtures/generate.py so the
+    two gates cannot drift.
+
+    `negative[].error` is the contract: every case must be refused for the
+    RIGHT reason, so a vector cannot pass by failing somewhere else."""
+    h = bytes.fromhex
+    out = []
+    def check(cond, label):
+        out.append((bool(cond), label))
+    ins = vec.get("inscription")
+    if not isinstance(ins, dict):
+        check(False, "③ section missing from the engine KAT copy (stale fixtures/bc30-v2-vectors.json?)")
+        return out
+
+    # ---- frozen constants (spec 2.1 / 2.3 / 3) ----
+    check(ins["protocol_tag"] == INSC_PROTOCOL_TAG.decode("ascii")
+          and h(ins["protocol_tag_hex"]) == INSC_PROTOCOL_TAG, "③ constants - protocol_tag \"bcrt\"")
+    check(ins["content_type"] == INSC_CONTENT_TYPE.decode("ascii")
+          and h(ins["content_type_hex"]) == INSC_CONTENT_TYPE, "③ constants - content_type (enforced by equality)")
+    check(ins["envelope_tag_utf8"] == ENVELOPE_TAG_V1.decode("ascii"), "③ constants - envelope_root domain tag")
+    check(ins["max_push"] == INSC_MAX_PUSH and ins["body_max"] == INSC_BODY_MAX,
+          "③ constants - 520 B chunks, %d B body cap" % INSC_BODY_MAX)
+    check(ins["flags"] == (FLAG_WITNESS_PRESENT | FLAG_IDENTITY_BOUND), "③ constants - flags 0b11 is the sole discriminator")
+    check(len(h(ins["nums_internal_key"])) == 32 and secp256k1_lift_x(h(ins["nums_internal_key"])),
+          "③ constants - BIP-341 NUMS internal key is a point (no key path)")
+
+    # ---- positives: both envelopes (single chunk, and the 520-byte rule in force) ----
+    for name in sorted(ins["envelopes"]):
+        e = ins["envelopes"][name]
+        script = h(e["script"])
+        try:
+            env = parse_inscription_envelope(script)
+        except EnvelopeError as ex:
+            check(False, "③ envelope %s - strict parse (%s)" % (name, ex.error)); continue
+        s_src = vec[e["s_source"]] if e["s_source"] in vec else vec["multisig"]["s"]
+        body = h(vec["R"]) + h(s_src)
+        check(env["protocol_tag"] == INSC_PROTOCOL_TAG and env["content_type"] == INSC_CONTENT_TYPE
+              and env["script_key"].hex() == ins["script_key_x_only"],
+              "③ envelope %s - script_key + tag + content_type recovered" % name)
+        check(env["body"] == body and env["body"].hex() == e["body"] and len(env["body"]) == e["body_len"],
+              "③ envelope %s - body is R(143) ‖ s (%s)" % (name, e["s_source"]))
+        check(env["chunk_lens"] == e["chunk_lens"], "③ envelope %s - canonical chunking %s" % (name, e["chunk_lens"]))
+        check(build_inscription_script(env["script_key"], env["protocol_tag"], env["content_type"], env["body"]) == script,
+              "③ envelope %s - re-serialises to the SAME script (MUST 20)" % name)
+        check(envelope_root_v1(env["protocol_tag"], env["content_type"], env["body"]).hex() == e["envelope_root"],
+              "③ envelope %s - envelope_root preimage (spec 2.3)" % name)
+        check(leaf_input_v2(LEAF_TYPE_ISSUANCE, h(vec["R"]), h(s_src)).hex() == e["leaf_input"],
+              "③ envelope %s - leaf_input binds the same R ‖ s" % name)
+
+    # ---- the reveal transaction: witness in, txid out ----
+    rv, an = ins["reveal"], ins["anchor"]
+    txid, payload = txid_from_raw(rv["reveal_tx_hex"])
+    check(txid == rv["reveal_txid"], "③ reveal - txid recomputes (witness deliberately excluded)")
+    check(payload == an["op_return_v31"], "③ reveal - carries the 86-byte payload")
+    items = extract_witness_items(rv["reveal_tx_hex"], rv["input_index"])
+    check(items is not None and [x.hex() for x in items] == rv["witness"], "③ reveal - witness stack matches the vector")
+    try:
+        script = inscription_witness_script(items, rv["witness_item_index"])
+        check(script.hex() == ins["envelopes"]["single"]["script"], "③ reveal - witness item %d IS the envelope script" % rv["witness_item_index"])
+    except EnvelopeError as ex:
+        check(False, "③ reveal - witness item %d rejected (%s)" % (rv["witness_item_index"], ex.error))
+    check(txid_from_raw(rv["commit_tx_hex"])[0] == rv["commit_txid"], "③ reveal - commit txid recomputes")
+
+    # ---- the anchor: one-leaf batch, aux fold, 86-byte payload ----
+    check(an["leaf_input"] == ins["envelopes"]["single"]["leaf_input"]
+          and leaf_hash(h(an["leaf_input"])).hex() == an["merkle_root"],
+          "③ anchor - merkle_root = SHA256(0x00 ‖ leaf_input), one-leaf batch")
+    ai = an["aux_inputs"]
+    check(ai["envelope_root"] == ins["envelopes"]["single"]["envelope_root"], "③ anchor - aux carries the envelope_root")
+    check(aux_commitment(h(ai["tl_root"]), h(ai["sl_root"]), h(ai["envelope_root"])).hex() == an["aux_commitment"],
+          "③ anchor - aux_commitment fold (only envelope_root differs from ①②)")
+    check(bc30_v31(h(an["merkle_root"]), h(an["batch_id"]), h(an["aux_commitment"]), flags=an["flags"]).hex() == an["op_return_v31"],
+          "③ anchor - 86-byte payload v31 with flags 0b11")
+    check(an["batch_id"] == vec["op_return_batch_id"] and an["merkle_root"] == vec["op_return_merkle_root"],
+          "③ anchor - reuses the KAT batch_id and merkle_root (one aux slot apart from ①②)")
+
+    # ---- the ③ slice of the v5 bundle (the complete file lives in fixtures/v5/) ----
+    bn = ins["bundle"]
+    check(bn["schema"] == SCHEMA_V5, "③ bundle - schema is v5 (③ is never v4)")
+    check(sorted(bn["inscription"]) == sorted(INSC_FIELDS) and not _inscription_schema_problems(bn["inscription"]),
+          "③ bundle - `inscription` carries exactly reveal_txid / input_index / witness_item_index")
+    check(bn["record"]["leaf_bytes"] == an["leaf_input"] and bn["aux"]["envelope_root"] == ai["envelope_root"]
+          and bn["anchor"]["op_return_payload_hex"] == an["op_return_v31"], "③ bundle - slice agrees with the anchor")
+    check(inscription_batch_error(bn["merkle"], bn["record"]["leaf_bytes"]) is None, "③ bundle - single-leaf merkle section (MUST 25)")
+    check(inscription_equivalence_error(an["flags"], bn["aux"]["envelope_root"], True) == (None, None),
+          "③ bundle - the three-way equivalence holds (MUST 15)")
+
+    # ---- negatives: each must be refused, and for its OWN declared reason ----
+    neg = ins["negative"]
+    check(len(neg) == 29, "③ negatives - 29 cases present")
+    for nc in neg:
+        want, stage, got = nc["error"], nc["stage"], None
+        if stage in ("envelope", "binding"):
+            try:
+                env = parse_inscription_envelope(h(nc["script"]))
+                if env["protocol_tag"] != INSC_PROTOCOL_TAG: got = "protocol_tag_mismatch"
+                elif env["content_type"] != INSC_CONTENT_TYPE: got = "content_type_mismatch"
+                elif env["body"][:RECORD_LEN].hex() != vec["R"]: got = "record_mismatch"
+                elif env["body"][RECORD_LEN:].hex() != vec["s_webauthn"]: got = "signature_mismatch"
+            except EnvelopeError as ex:
+                got = ex.error
+        elif stage == "witness":
+            try:
+                parse_inscription_envelope(inscription_witness_script([h(x) for x in nc["witness"]], nc["witness_item_index"]))
+            except EnvelopeError as ex:
+                got = ex.error
+        elif stage == "anchor":
+            got = inscription_equivalence_error(nc["flags"], nc["envelope_root"], nc["has_inscription"])[0]
+        elif stage == "batch":
+            got = inscription_batch_error(nc["merkle"], nc["leaf_input"])
+        elif stage == "bundle":
+            # bc30-leaf has no bundle schema: these fix the SHAPE and the offending
+            # key, and the enforcement is this verifier's whitelists (MUST 14).
+            k = nc["offending_key"]
+            if nc["name"] == "bundle_v4_with_inscription":
+                got = "schema_forbids_inscription" if k not in V4_TOP_LEVEL_FIELDS else None
+            elif nc["name"] == "bundle_inscription_unknown_field":
+                got = "unknown_field" if k not in INSC_FIELDS and _inscription_schema_problems(nc["inscription"]) else None
+            elif nc["name"] == "bundle_anchor_unknown_field":
+                got = "unknown_field" if k not in ANCHOR_FIELDS_V5 else None
+            else:
+                got = "unknown_field" if k not in V5_SIGNER_FIELDS else None
+        check(got == want, "③ negative - %s refused at %s with %r%s"
+              % (nc["name"], stage, want, "" if got == want else " (got %r)" % (got,)))
+
+    # ---- undetermined: no reveal_tx_hex is exit 3, never a record rejection ----
+    for uc in ins["undetermined"]:
+        check(uc["expect"] == "undetermined" and uc["error"] == "reveal_tx_missing",
+              "③ undetermined - %s stays undetermined (MUST 26 cannot run)" % uc["name"])
+    return out
 
 # ----- --selftest -----
 # RFC 6979 §A.2.5 "ECDSA, 256 Bits (Prime Field)" - copied from the RFC text
@@ -1481,6 +3254,14 @@ def selftest(vectors_path=None):
         ok, reasons, _ = webauthn_verify_assertion(h(vec["subject_pub33"]), h(vec["present_authenticator_data"]), h(vec["present_client_data_json"]),
                                                     h(vec["present_signature_der"]), ch, vec["rp_id"], [vec["origin"]])
         check(ok, "vectors - engine's presentation assertion verifies under subject key" + ("" if ok else " (%s)" % "; ".join(reasons)))
+        # party-model v2 sections (cosign / wallet / multisig / policy_open /
+        # es256_plain_alternate_s / negative_v2) - N0 primitives vs the engine KAT
+        for ok2, label in kat_v2_party_checks(vec):
+            check(ok2, label)
+        # ③ inscription tier (T0 freeze) - envelope / witness / anchor / batch /
+        # bundle stages, 29 negatives and the undetermined case
+        for ok3, label in kat_inscription_checks(vec):
+            check(ok3, label)
     else:
         _line("skip", "vectors - fixtures/bc30-v2-vectors.json not found (skipped)")
     print()
@@ -1758,7 +3539,8 @@ def print_v4_report(R, bundle):
             "undetermined": "no check failed, but at least one could not be decided from this bundle (? lines).",
             "rejected": "at least one check failed (✗ lines). This bundle does not prove what it claims."}[g]
     print("%s - %s" % (head, what))
-    print("  attribution: %s · presenter: %s" % (R.axes["attribution"], R.axes["presenter"]))
+    print("  attribution: %s · presenter: %s%s" % (R.axes["attribution"], R.axes["presenter"],
+          (" · publication: %s" % R.axes["publication"]) if "publication" in R.axes else ""))
     if R.info.get("txid"):
         print("  anchor tx %s%s" % (R.info["txid"], (" · block_time %d" % R.info["block_time"]) if R.info.get("block_time") else ""))
     print("  exit code %d" % R.exit_code)
@@ -1823,7 +3605,7 @@ def main(argv):
         return _usage("bundle must be a JSON object")
     original_bytes = open(original, "rb").read() if original else None
 
-    if bundle.get("schema") == SCHEMA_V4:
+    if bundle.get("schema") in (SCHEMA_V4, SCHEMA_V5):
         pres = None
         if present is not None:
             import os
@@ -1832,8 +3614,9 @@ def main(argv):
                 pres = parse_presentation_blob(text)
             except (ValueError, json.JSONDecodeError) as e:
                 return _usage("--present blob unreadable: %s" % e)
-        R = verify_v4(bundle, identifier=identifier, presentation=pres, nonce_hex=nonce, rp_id=rp_id,
-                      origins=origins or None, now=now, explorer=explorer, original_bytes=original_bytes)
+        run = verify_v5 if bundle.get("schema") == SCHEMA_V5 else verify_v4
+        R = run(bundle, identifier=identifier, presentation=pres, nonce_hex=nonce, rp_id=rp_id,
+                origins=origins or None, now=now, explorer=explorer, original_bytes=original_bytes)
         print_v4_report(R, bundle)
         if want_url:
             print_present_url(bundle, R, label, console, now if now is not None else int(time.time()))

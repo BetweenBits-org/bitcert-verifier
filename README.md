@@ -72,6 +72,37 @@ two **axes**: *attribution* (`none` · `issuer-claim · identifier` · `issuer-c
 pubkey`) and *presenter* (`confirmed` · `not available`). The passkey relying party
 is **pinned** to `console.bitcert.io`; the bundle's own `rp_id` is only a claim.
 
+### Multi-party issuance (bundle v5, §12)
+
+A **v5** bundle extends v4 with an **open policy grammar** (up to 16 key-value
+pairs under a hard displayability gate), a **Bitcoin wallet issuer signature**
+(`wallet-secp256k1`, signed with Unisat/Xverse/Leather over a tagged message;
+low-s enforced) and a role-labelled **multi-signature envelope**: up to 8
+signers - `issuer` · `co-issuer` · `subject-consent` · `endorser` - each signing
+a role-bound message `m_i`, so a collected signature cannot be re-labelled into
+a different role. Organisation keys (`issuer`/`co-issuer`) must prove listing
+under the platform trust list; a consent signed by the subject's own registered
+key is confirmed against `subject_ref` (a mismatch warns, never rejects). A
+single-signature v5 bundle keeps the v4 pipeline unchanged.
+
+### Published issuer signature (bundle v5, `inscription`)
+
+A v5 bundle may also carry an **`inscription`** section. The transaction that
+carries the anchor also carries a taproot witness holding the 143-byte record
+and the issuer signature bytes, so those bytes are published rather than merely
+committed. **The document is not published** - the record carries its hash, not
+its content. The verifier recovers the envelope from the witness with a strict,
+byte-exact parser, binds it to the record and the signature it already
+reconstructed, and recomputes the `envelope_root` the anchor commits.
+
+Whether the envelope was actually **published** is a separate axis from whether
+the record is valid. Offline the verifier reports `publication: committed` and
+grades that step *undetermined* (exit 3): it read the witness from the bundle,
+not from Bitcoin. Point `--explorer` at a Bitcoin source you choose and it
+fetches the raw transaction WITH its witness and compares it byte for byte; only
+then does it say `publication: published`. A source that serves a different
+witness for that txid refuses the claim.
+
 ---
 
 ## Use it
@@ -134,9 +165,11 @@ the pinned relying party and the clock for staging or reproducible runs.
 | 9 | **Not revoked when anchored** *(v4)* - 256-level sparse-Merkle exclusion proof folded from the **pinned** empty leaf `SHA-256(0x11)` to `sl_root`; a present value ⇒ revoked ⇒ rejected. | No |
 | 10 | **Recipient / presenter** *(v4)* - `subject_ref` recomputed (zero · `SHA-256(salt ‖ identifier)` · `SHA-256(0x02 ‖ curve ‖ pubkey)`); for a registered key, the holder signs a challenge this verifier generated (`nonce ‖ leaf ‖ verifier_id ‖ expiry`). Missing/failed ⇒ *presenter: not available*, never rejected. | No (the signing itself needs the console origin) |
 | 11 | **Expiry** *(v4)* - `expires_at` in the past ⇒ warning, never rejection. | No |
+| 12 | **Published envelope** *(v5 `inscription`)* - the reveal witness holds `R ‖ s`; strict parse, re-serialisation identity, tag/type equality, binding to the reconstructed `R` and `s`, recomputed `envelope_root` folded into `aux`, single-leaf batch. | No |
+| 13 | **Publication** *(v5 `inscription`)* - the raw transaction WITH its witness, from a Bitcoin source **you** choose, byte-identical to the bundle's. Without it the step is *undetermined* and publication stays `committed`. | Yes - your node / any explorer, **never BitCert** |
 
-Steps 0–4 and 6–11 are pure offline cryptography. Step 5 is the single
-Bitcoin-dependent check; offline, the verifier reports it as `SKIPPED` and the
+Steps 0–4, 6–11 and 12 are pure offline cryptography. Steps 5 and 13 are the
+Bitcoin-dependent checks; offline, the verifier reports it as `SKIPPED` and the
 binding from step 3 still holds. The full v4 pipeline (19 numbered steps, four
 grades, two axes) is in [`docs/bundle-schema.md`](docs/bundle-schema.md) §11.
 
@@ -217,6 +250,10 @@ python3 fixtures/v4-rc-matrix.py        # CLI exit codes 0/1/2/3/64 over fixture
 node    fixtures/browser-js-check.mjs   # browser JS == Python == ann-core test vector (+ v4 builders vs KAT)
 node    fixtures/p256/kat.mjs           # zk-core.js P-256/WebAuthn, crypto.subtle AND pure-BigInt paths
 node    fixtures/v4-grade-check.mjs     # index.html runV4 reproduces Python's oracle: grade, axes, every step
+python3 fixtures/v5-rc-matrix.py        # CLI exit codes 0/1/2 over fixtures/v5-expected.json (subprocess)
+node    fixtures/multisig/kat.mjs       # zk-core.js 0x10/wallet/policy primitives vs the engine KAT (27 negatives)
+node    fixtures/v5-grade-check.mjs     # index.html runV5 reproduces Python's oracle: grade, axes, every step
+node    fixtures/inscription/kat.mjs    # zk-core.js ③ envelope/witness/anchor/batch vs the engine KAT (29 negatives)
 node    tools/inline-zk.mjs --check     # the inlined crypto in index.html equals zk-core.js
 node    fixtures/zk/conformance.mjs && node fixtures/zk/browser-path.mjs
 ```
